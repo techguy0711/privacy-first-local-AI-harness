@@ -1,0 +1,21 @@
+# Secrets
+.env
+.continue/.env
+.continue/.env.*.bak
+
+# Native Open WebUI install (repo-local venv)
+.venv/
+
+# Downloaded acp-bridge binary (pinned version re-fetched by setup.sh --editors)
+bin/
+
+# Runtime data and logs
+data/
+logs/
+run/
+
+# Backups made by setup.sh before overwriting files outside the repo
+*.bak
+
+# OS cruft
+.DS_Store

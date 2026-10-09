@@ -1,0 +1,47 @@
+name: Local Assistant
+version: 0.0.1
+schema: v1
+
+models:
+  - name: Coder Local
+    provider: ollama
+    model: coder-local
+    apiBase: http://127.0.0.1:11434
+    roles:
+      - chat
+
+  - name: Nomic Embed
+    provider: ollama
+    model: nomic-embed-text
+    apiBase: http://127.0.0.1:11434
+    roles:
+      - embed
+
+  # Autocomplete is off by default in local mode -- memory is tight on a 16GB
+  # Mac. To enable, uncomment below. starcoder2:3b is the ONLY allowlisted
+  # autocomplete model -- do not substitute Continue's own doc-recommended
+  # qwen2.5-coder, which is not on the allowlist.
+  # - name: StarCoder2 Autocomplete
+  #   provider: ollama
+  #   model: starcoder2:3b
+  #   apiBase: http://127.0.0.1:11434
+  #   roles:
+  #     - autocomplete
+
+mcpServers:
+  - name: Brave Search
+    type: stdio
+    command: npx
+    args:
+      - "-y"
+      - "@brave/brave-search-mcp-server@2.1.4"
+      - "--transport"
+      - "stdio"
+    env:
+      BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+      BRAVE_MCP_ENABLED_TOOLS: "brave_web_search brave_news_search"
+
+# __SYSTEM_PROMPT_PATH__ is replaced with an absolute file:// URI by
+# `scripts/setup.sh --editors` when this file is copied into ~/.continue/.
+rules:
+  - uses: __SYSTEM_PROMPT_PATH__

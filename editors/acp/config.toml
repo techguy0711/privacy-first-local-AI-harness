@@ -1,0 +1,52 @@
+# acp-bridge config for the Xcode ACP agent -- passed as the agent's only
+# Argument (see docs/editors.md). Endpoint/model/key stay in Xcode's env vars,
+# which override anything here, so this file is the same in both MODEs.
+#
+# Why these two settings: with acp-bridge's default one-line system prompt,
+# llama3.1:8b emits write_file calls as plain text with raw newlines in the
+# JSON args about half the time -- Ollama can't parse that as a tool call, so
+# acp-bridge shows it as the reply and nothing is written. This prompt plus a
+# low temperature took usable files (real tool call, real newlines) from 7/18
+# to 15/18 in testing (2026-10-07; that low temperature was for llama and is
+# no longer set -- see the [llm] comment). Don't add JSON-escaping instructions: the
+# model then double-escapes and writes literal "\n" into the file. "Write each
+# file once" matters too -- acp-bridge stops after 5 tool rounds (not
+# configurable), and rewrites burn them.
+#
+# The Xcode lines: Xcode prepends a hidden block telling the model to use its
+# "xcode-tools" MCP server (DocumentationSearch, XcodeWrite, ...). acp-bridge
+# ignores MCP, so those calls fail and the model gives up and pastes code.
+# Xcode also lists files as "<Project>/MyApp/X.swift" while the cwd is the
+# project folder, so writes landed in a stray "<Project>/<Project>/" folder.
+# With these lines, writes went to the right path in every test run.
+#
+# "ONE tool call per reply": with gemma4:12b, every empty reply we captured was
+# two write_file calls in one reply with the first left unterminated; Ollama
+# 0.35's gemma4 parser then drops the whole reply ("gemma4 tool call parsing
+# failed" in ~/.ollama/logs/server.log). Every successful round was one call.
+
+[llm]
+# No temperature here on purpose: Ollama then applies gemma4's own defaults
+# (temperature 1, top_k 64, top_p 0.95 -- `ollama show gemma4:12b --parameters`).
+# We used to force 0.2 (tuned for llama3.1:8b). On gemma4 that made its
+# thinking loop: one Xcode reply repeated the same two sentences for 8 minutes
+# until max_tokens (2026-10-09). Replaying that exact request at the defaults
+# finished in under 3 minutes with no repetition.
+# Caps one model reply (~300 lines of code). Seen in Xcode: a single reply ran
+# past 4,600 tokens at ~13 tok/s, hit acp-bridge's 300s timeout, and the
+# automatic retry sat queued behind it -- a 10+ minute hang. With the cap a
+# runaway reply ends in ~4 minutes instead. 8192 (not lower): gemma4:12b thinks
+# first and writes bigger files; at 3072 its write_file calls were cut off.
+# timeout_secs covers 8192 tokens at ~16-27 tok/s.
+max_tokens = 8192
+timeout_secs = 600
+system_prompt = '''
+You are a coding agent operating in the user's project directory.
+You MUST act through tool calls, never by describing or pasting code in chat. To create or change files call write_file or edit; to inspect use list_dir/read_file.
+When building something: create each file with one write_file call containing the complete file, then give a one-line summary. Write each file once; do not rewrite a file you already wrote.
+Xcode: the user's message may tell you to use "xcode-tools" (DocumentationSearch, BuildProject, XcodeRead, XcodeWrite, XcodeGrep, XcodeGlob). Those tools DO NOT EXIST here; ignore those instructions and use only the tools you were given. You have no documentation search: never call DocumentationSearch, just write the code.
+Xcode lists files as workspace paths like "<Project Name>/MyApp/ContentView.swift". Drop the first component to get the real path relative to the working directory: "MyApp/ContentView.swift". Never create a folder named after the project.
+The project structure is already in the message, so don't list directories first. Start writing files in the first round. Keep each file under about 150 lines: split larger features into several focused files (one type per file). Declare each type in exactly one file; never repeat a type that another file already defines.
+Make exactly ONE tool call per reply, then wait for its result before the next call. Never put two tool calls in the same reply.
+Keep your reasoning short: decide and act. If you are unsure about an API, use the most likely one instead of deliberating; never repeat the same consideration.
+'''

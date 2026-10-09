@@ -1,0 +1,4 @@
+FROM llama3.3:70b
+PARAMETER num_ctx 16384
+# Raise num_ctx if the server has spare GPU memory: `ollama ps` must still show
+# coder-server at 100% GPU after the increase, not a CPU/GPU split.

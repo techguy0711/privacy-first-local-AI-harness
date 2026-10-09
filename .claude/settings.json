@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -f /tmp/test_allowlist.sh)",
+      "Bash(command -v ollama)",
+      "Bash(echo \"ollama: $\\(command -v ollama || echo MISSING\\)\")",
+      "Bash(command -v uv)",
+      "Bash(echo \"uv: $\\(command -v uv || echo MISSING\\)\")",
+      "Bash(command -v python3)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//usr/local/bin/**)",
+      "Bash(command -v brew)",
+      "Bash(brew --version)",
+      "Bash(brew --prefix)",
+      "WebFetch(domain:phimage.github.io)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp"
+    ]
+  }
+}
