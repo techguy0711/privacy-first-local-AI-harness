@@ -1,0 +1,83 @@
+"""One configuration boundary for the scripts and inference gateway."""
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlparse
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def loopback_url(value):
+    url = urlparse(value)
+    if url.scheme != 'http' or url.hostname != '127.0.0.1' or url.username or url.password or url.query or url.fragment:
+        raise ValueError('Internal service URLs must use http://127.0.0.1 (TLS belongs at the private reverse proxy)')
+    return value.rstrip('/')
+
+
+def positive(env, name, default):
+    value = int(env.get(name, default))
+    if value < 1:
+        raise ValueError(f'{name} must be positive')
+    return value
+
+
+@dataclass
+class Settings:
+    mode: str
+    backend: str
+    model: str
+    upstream: str
+    ollama: str
+    webui: str
+    gateway: str
+    service_key: str
+    active: int
+    waiting: int
+    per_user: int
+    wait_seconds: int
+    run_seconds: int
+    retention: int
+    max_jobs: int
+    max_body: int
+    max_result: int
+
+    @classmethod
+    def read(cls, env=None):
+        e = os.environ if env is None else env
+        mode = e.get('MODE', 'local')
+        if mode not in ('local', 'server'):
+            raise ValueError('MODE must be local or server')
+        backend = 'ollama'
+        if e.get('INFERENCE_BACKEND', 'ollama') not in ('', 'ollama'):
+            raise ValueError('Only Ollama is supported')
+        ollama = loopback_url(e.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434'))
+        upstream = ollama + '/v1'
+        if urlparse(upstream).path != '/v1':
+            raise ValueError('Inference URL must end with /v1')
+        if e.get('EMBED_MODEL', 'nomic-embed-text') != 'nomic-embed-text':
+            raise ValueError('Only nomic-embed-text is supported for embeddings')
+        for name in ('WEBUI_HOST', 'BRAVE_MCP_HOST'):
+            if e.get(name, '127.0.0.1') != '127.0.0.1':
+                raise ValueError(f'{name} must remain 127.0.0.1; use the private TLS proxy')
+        return cls(mode, backend, f'coder-{mode}:latest', upstream, ollama,
+                   f"http://127.0.0.1:{positive(e, 'WEBUI_PORT', 3000)}",
+                   f"http://127.0.0.1:{positive(e, 'GATEWAY_PORT', 8787)}",
+                   e.get('GATEWAY_SERVICE_KEY', ''),
+                   positive(e, 'QUEUE_ACTIVE', 1), positive(e, 'QUEUE_WAITING', 32),
+                   positive(e, 'QUEUE_PER_USER', 2), positive(e, 'QUEUE_WAIT_SECONDS', 300),
+                   positive(e, 'INFERENCE_TIMEOUT_SECONDS', 600), positive(e, 'QUEUE_RETENTION_SECONDS', 300),
+                   positive(e, 'QUEUE_MAX_JOBS', 128), positive(e, 'QUEUE_MAX_BODY_BYTES', 1048576),
+                   positive(e, 'QUEUE_MAX_RESULT_BYTES', 4194304))
+
+    def shell(self):
+        import shlex
+        values = dict(INFERENCE_BACKEND=self.backend, CHAT_MODEL=self.model,
+                      INFERENCE_BASE_URL=self.upstream, GATEWAY_BASE_URL=self.gateway,
+                      OLLAMA_BASE_URL=self.ollama,
+                      EDITOR_TIMEOUT_MS=(self.wait_seconds + self.run_seconds + 60) * 1000)
+        return '\n'.join(f'export {k}={shlex.quote(str(v))}' for k, v in values.items())
+
+
+if __name__ == '__main__':
+    print(Settings.read().shell())

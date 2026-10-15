@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# up | down | status for Open WebUI and the Brave MCP server.
+# up | down | status for the inference gateway, Ollama, WebUI and Brave.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,12 +30,15 @@ BRAVE_MCP_PORT="${BRAVE_MCP_PORT:-8765}"
 BRAVE_MCP_VERSION="${BRAVE_MCP_VERSION:-}"
 BRAVE_MCP_ENABLED_TOOLS="${BRAVE_MCP_ENABLED_TOOLS:-brave_web_search brave_news_search}"
 
+source "$REPO_ROOT/scripts/runtime.sh"
+
 RUN_DIR="$REPO_ROOT/run"
 LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
 WEBUI_PID_FILE="$RUN_DIR/openwebui.pid"
 BRAVE_PID_FILE="$RUN_DIR/brave-mcp.pid"
+GATEWAY_PID_FILE="$RUN_DIR/gateway.pid"
 
 is_running() {
   local pid_file="$1"
@@ -71,11 +74,21 @@ start_openwebui() {
     export WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY"
     export WEBUI_AUTH=true
     export OLLAMA_BASE_URL="$OLLAMA_BASE_URL"
+    export ENABLE_OLLAMA_API=false
+    export ENABLE_OPENAI_API=true
+    export OPENAI_API_BASE_URLS="$GATEWAY_BASE_URL/v1"
+    export OPENAI_API_KEYS="$GATEWAY_SERVICE_KEY"
+    export ENABLE_FORWARD_USER_INFO_HEADERS=true
+    # Environment is authoritative when MODE/backend changes.
+    export ENABLE_PERSISTENT_CONFIG=false
+    export AIOHTTP_CLIENT_TIMEOUT="$((EDITOR_TIMEOUT_MS / 1000))"
     # Open WebUI's internal model id includes the ":latest" tag that
     # `ollama create coder-<mode>` (no explicit tag) produces -- confirmed
     # via GET /api/models; "coder-<mode>" alone does not match.
-    export DEFAULT_MODELS="coder-$MODE:latest"
-    export RAG_EMBEDDING_ENGINE=ollama
+    export DEFAULT_MODELS="$CHAT_MODEL"
+    export RAG_EMBEDDING_ENGINE=openai
+    export RAG_OPENAI_API_BASE_URL="$GATEWAY_BASE_URL/v1"
+    export RAG_OPENAI_API_KEY="$GATEWAY_SERVICE_KEY"
     export RAG_EMBEDDING_MODEL="$EMBED_MODEL"
     export ENABLE_RAG_HYBRID_SEARCH=false
     export OFFLINE_MODE=true
@@ -95,6 +108,24 @@ start_openwebui() {
     exit 1
   fi
   echo "Open WebUI started (pid $(cat "$WEBUI_PID_FILE")); logs at logs/openwebui.log"
+}
+
+start_inference() {
+  local python="$REPO_ROOT/.venv/openwebui/bin/python"
+  if [[ ! -x "$python" || -z "${GATEWAY_SERVICE_KEY:-}" ]]; then
+    echo "ERROR: Run ./scripts/setup.sh to prepare the gateway runtime and service key." >&2
+    exit 1
+  fi
+  if ! is_running "$GATEWAY_PID_FILE"; then
+    nohup "$python" -m uvicorn services.gateway:create_app --factory --host 127.0.0.1 \
+      --port "${GATEWAY_PORT:-8787}" --workers 1 --no-access-log >> "$LOG_DIR/gateway.log" 2>&1 &
+    echo $! > "$GATEWAY_PID_FILE"
+    sleep 1
+    if ! is_running "$GATEWAY_PID_FILE"; then
+      echo "ERROR: Gateway failed; see logs/gateway.log" >&2
+      exit 1
+    fi
+  fi
 }
 
 start_brave() {
@@ -151,14 +182,23 @@ status_proc() {
 
 case "${1:-}" in
   up)
+    current_hash="$(shasum -a 256 "$ENV_FILE" | awk '{print $1}')"
+    if is_running "$GATEWAY_PID_FILE" && [[ "$(cat "$RUN_DIR/stack.env.sha256" 2>/dev/null || true)" != "$current_hash" ]]; then
+      echo "ERROR: .env changed while running. Run ./scripts/stack.sh down, then up." >&2
+      exit 1
+    fi
+    start_inference
     start_openwebui
     start_brave
+    printf '%s' "$current_hash" > "$RUN_DIR/stack.env.sha256"
     ;;
   down)
+    stop_proc "$GATEWAY_PID_FILE" "Inference gateway"
     stop_proc "$WEBUI_PID_FILE" "Open WebUI"
     stop_proc "$BRAVE_PID_FILE" "Brave MCP server"
     ;;
   status)
+    status_proc "$GATEWAY_PID_FILE" "Inference gateway"
     status_proc "$WEBUI_PID_FILE" "Open WebUI"
     if [[ -z "${BRAVE_API_KEY:-}" ]]; then
       echo "Brave MCP server: disabled (no BRAVE_API_KEY set)"

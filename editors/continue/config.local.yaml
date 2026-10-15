@@ -1,32 +1,36 @@
-name: Local Assistant
+name: Gemma 4 12B (Local)
 version: 0.0.1
 schema: v1
 
 models:
-  - name: Coder Local
-    provider: ollama
-    model: coder-local
-    apiBase: http://127.0.0.1:11434
+  - name: Gemma 4 12B (Local)
+    provider: openai
+    model: coder-local:latest
+    apiBase: __GATEWAY_BASE_URL__
+    requestOptions:
+      timeout: __EDITOR_TIMEOUT_MS__
     roles:
       - chat
+    # Continue's built-in search_web sends queries to Continue's own cloud
+    # proxy (not Brave) and fetch_url_content fetches arbitrary URLs -- both
+    # break "nothing reports out". Web search goes through the Brave MCP
+    # server below instead. Verified in continuedev/continue v2.0.0-vscode:
+    # chatOptions.toolOverrides.<tool>.disabled removes the tool entirely.
+    chatOptions:
+      toolOverrides:
+        search_web:
+          disabled: true
+        fetch_url_content:
+          disabled: true
 
-  - name: Nomic Embed
-    provider: ollama
+  - name: Nomic Embeddings (Local)
+    provider: openai
     model: nomic-embed-text
-    apiBase: http://127.0.0.1:11434
+    apiBase: __GATEWAY_BASE_URL__
     roles:
       - embed
 
-  # Autocomplete is off by default in local mode -- memory is tight on a 16GB
-  # Mac. To enable, uncomment below. starcoder2:3b is the ONLY allowlisted
-  # autocomplete model -- do not substitute Continue's own doc-recommended
-  # qwen2.5-coder, which is not on the allowlist.
-  # - name: StarCoder2 Autocomplete
-  #   provider: ollama
-  #   model: starcoder2:3b
-  #   apiBase: http://127.0.0.1:11434
-  #   roles:
-  #     - autocomplete
+  # Autocomplete remains disabled; the gateway exposes chat and embeddings only.
 
 mcpServers:
   - name: Brave Search

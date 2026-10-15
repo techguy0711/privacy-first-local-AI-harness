@@ -1,2 +1,5 @@
-FROM llama3.1:8b
+FROM gemma4:12b
 PARAMETER num_ctx 16384
+# No temperature on purpose: gemma4's own defaults (temperature 1, top_k 64,
+# top_p 0.95) apply. 0.2 (tuned for llama3.1:8b) made its thinking loop for
+# minutes -- see editors/acp/config.toml.

@@ -1,11 +1,11 @@
 # AGENTS.md
 
-This repo is a self-hosted AI coding assistant stack (Ollama + Open WebUI + Brave MCP + Continue), switchable between a local Mac and a shared server via `MODE` in `.env`. The rules below are non-negotiable for any future work here.
+This repo is a self-hosted AI coding assistant stack (Ollama + inference gateway + Open WebUI + Brave MCP + Continue), switchable between a local Mac and a shared server via `MODE` in `.env`. The rules below are non-negotiable for any future work here.
 
 ## Hard rules
 
 1. **Model allowlist.** Only these models may be pulled, configured, or suggested anywhere (chat, embeddings, reranking, autocomplete):
-   `llama3.1:8b`, `llama3.3:70b` (Meta), `nomic-embed-text` (Nomic), `starcoder2:3b` (BigCode, autocomplete only), and our own derived `coder-local`/`coder-server`.
+   `llama3.1:8b`, `llama3.3:70b` (Meta), `gemma4:12b` (Google DeepMind; approved 2026-10-07 as a stronger 16GB-Mac candidate), `nomic-embed-text` (Nomic), `starcoder2:3b` (BigCode, autocomplete only), and our own derived `coder-local`/`coder-server`.
    No models of Chinese origin or anything derived from them (Qwen, DeepSeek incl. "R1-Distill-Llama", Yi, GLM, Baichuan, InternLM, MiniMax, Kimi, BGE, GTE). Watch for tools that default to these quietly (Continue's autocomplete docs recommend Qwen; many RAG setups default to BGE). Any addition to the allowlist needs explicit approval first.
 2. **Nothing reports out.** Telemetry, analytics, update checks, and sharing features stay off in every component. At runtime the only allowed outbound traffic is Brave Search API calls. Model pulls/updates during setup are expected and documented in `docs/privacy.md`.
 3. **Source code never goes into a search query.** Web search is for public information only (library/API docs, error patterns). Enforced via `prompts/system.md`, loaded into both Open WebUI and Continue.
@@ -18,8 +18,8 @@ This repo is a self-hosted AI coding assistant stack (Ollama + Open WebUI + Brav
 ## The three scripts
 
 ```
-./scripts/setup.sh [--editors]   # idempotent install/config; --editors opts into writing ~/.continue/config.yaml (backed up first)
-./scripts/stack.sh up|down|status   # Open WebUI + Brave MCP server (skipped if BRAVE_API_KEY is empty)
+./scripts/setup.sh [--editors]   # idempotent install/config; --editors opts into writing ~/.continue/config.yaml (backed up first) and, on macOS, building bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
+./scripts/stack.sh up|down|status   # gateway + selected backend + Open WebUI + Brave MCP server (skipped if BRAVE_API_KEY is empty)
 ./scripts/doctor.sh               # PASS/FAIL per check; exits non-zero on any failure
 ```
 

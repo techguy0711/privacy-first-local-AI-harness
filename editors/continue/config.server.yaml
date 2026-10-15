@@ -1,40 +1,36 @@
-name: Server Assistant
+name: Llama 3.3 70B (Server)
 version: 0.0.1
 schema: v1
 
-# Editors never talk to Ollama directly in server mode -- only to Open WebUI's
-# authenticated OpenAI-compatible API, reverse-proxied over TLS. See
-# docs/server.md for the proxy routes __SERVER_HOST__ substitutes for below,
-# and for how to get a per-user Open WebUI API key (sk-...).
+# The gateway verifies personal Open WebUI API keys and queues requests.
 models:
-  - name: Coder Server
+  - name: Llama 3.3 70B (Server)
     provider: openai
-    # Open WebUI's own model registry requires the exact id incl. tag --
-    # confirmed live via GET /api/models -- "coder-server" alone 400s.
     model: coder-server:latest
-    apiBase: https://__SERVER_HOST__/api
+    apiBase: https://__SERVER_HOST__/v1
     apiKey: ${{ secrets.OPENWEBUI_API_KEY }}
+    requestOptions:
+      timeout: __EDITOR_TIMEOUT_MS__
     roles:
       - chat
+    # Same as config.local.yaml: disable Continue's cloud-backed search_web and
+    # arbitrary-URL fetch_url_content; web search goes through Brave MCP.
+    chatOptions:
+      toolOverrides:
+        search_web:
+          disabled: true
+        fetch_url_content:
+          disabled: true
 
-  - name: Nomic Embed (server)
+  - name: Nomic Embeddings (Server)
     provider: openai
     model: nomic-embed-text
-    apiBase: https://__SERVER_HOST__/ollama-embed
+    apiBase: https://__SERVER_HOST__/v1
     apiKey: ${{ secrets.OPENWEBUI_API_KEY }}
     roles:
       - embed
 
-  # Autocomplete is off by default. If enabled, use only starcoder2:3b (the
-  # only allowlisted autocomplete model), pulled server-side and exposed the
-  # same way as the chat model above.
-  # - name: StarCoder2 Autocomplete (server)
-  #   provider: openai
-  #   model: starcoder2:3b:latest   # Open WebUI requires the exact tagged id
-  #   apiBase: https://__SERVER_HOST__/api
-  #   apiKey: ${{ secrets.OPENWEBUI_API_KEY }}
-  #   roles:
-  #     - autocomplete
+  # Autocomplete remains disabled; the gateway exposes chat and embeddings only.
 
 # Brave MCP still runs locally on the developer's own machine over stdio --
 # web search is independent of which machine serves the chat model.

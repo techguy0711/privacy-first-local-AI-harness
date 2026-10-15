@@ -2,28 +2,32 @@
 # Argument (see docs/editors.md). Endpoint/model/key stay in Xcode's env vars,
 # which override anything here, so this file is the same in both MODEs.
 #
-# Why these two settings: with acp-bridge's default one-line system prompt,
-# llama3.1:8b emits write_file calls as plain text with raw newlines in the
-# JSON args about half the time -- Ollama can't parse that as a tool call, so
-# acp-bridge shows it as the reply and nothing is written. This prompt plus a
-# low temperature took usable files (real tool call, real newlines) from 7/18
-# to 15/18 in testing (2026-10-07; that low temperature was for llama and is
-# no longer set -- see the [llm] comment). Don't add JSON-escaping instructions: the
-# model then double-escapes and writes literal "\n" into the file. "Write each
-# file once" matters too -- acp-bridge stops after 5 tool rounds (not
-# configurable), and rewrites burn them.
+# The prompt below grew out of testing (2026-10-07 .. 10): with acp-bridge's
+# default one-line prompt, small models wrote tool calls as plain text. Don't
+# add JSON-escaping instructions: the model then double-escapes and writes
+# literal "\n" into the file. "Write each file once" avoids rewrites that burn
+# rounds (LLM_MAX_TOOL_ROUNDS, default 30).
 #
-# The Xcode lines: Xcode prepends a hidden block telling the model to use its
-# "xcode-tools" MCP server (DocumentationSearch, XcodeWrite, ...). acp-bridge
-# ignores MCP, so those calls fail and the model gives up and pastes code.
-# Xcode also lists files as "<Project>/MyApp/X.swift" while the cwd is the
-# project folder, so writes landed in a stray "<Project>/<Project>/" folder.
-# With these lines, writes went to the right path in every test run.
+# Xcode: Xcode prepends a hidden block telling the model to use its
+# "xcode-tools" MCP server. acp-bridge now connects to that server itself
+# (Xcode passes it in session/new; only the mcpbridge paths below may run)
+# and offers the model ONE of its tools, documentation search, as
+# `docs_search`; it uses XcodeRefreshCodeIssuesInFile after Swift edits and
+# BuildProject for its own builds. Xcode tool names the model still calls
+# (XcodeRead, XcodeUpdate, BuildProject, ...) are mapped onto acp-bridge's own
+# tools. Xcode asks "Allow acp-bridge to access Xcode?" once per Xcode launch
+# and again after every acp-bridge rebuild; until it is answered the agent
+# works without those tools.
 #
 # "ONE tool call per reply": with gemma4:12b, every empty reply we captured was
 # two write_file calls in one reply with the first left unterminated; Ollama
 # 0.35's gemma4 parser then drops the whole reply ("gemma4 tool call parsing
 # failed" in ~/.ollama/logs/server.log). Every successful round was one call.
+#
+# bash: acp-bridge's `bash` tool runs whatever command the model writes, in
+# the project folder, without a sandbox (upstream behaviour). The prompt line
+# against network commands is an instruction to the model, not enforcement --
+# see docs/privacy.md.
 
 [llm]
 # No temperature here on purpose: Ollama then applies gemma4's own defaults
@@ -31,22 +35,82 @@
 # We used to force 0.2 (tuned for llama3.1:8b). On gemma4 that made its
 # thinking loop: one Xcode reply repeated the same two sentences for 8 minutes
 # until max_tokens (2026-10-09). Replaying that exact request at the defaults
-# finished in under 3 minutes with no repetition.
-# Caps one model reply (~300 lines of code). Seen in Xcode: a single reply ran
-# past 4,600 tokens at ~13 tok/s, hit acp-bridge's 300s timeout, and the
-# automatic retry sat queued behind it -- a 10+ minute hang. With the cap a
-# runaway reply ends in ~4 minutes instead. 8192 (not lower): gemma4:12b thinks
-# first and writes bigger files; at 3072 its write_file calls were cut off.
-# timeout_secs covers 8192 tokens at ~16-27 tok/s.
-max_tokens = 8192
+# finished in under 3 minutes with no repetition. acp-bridge also discards a
+# looping reply and retries once with thinking off ([guards] loop_check).
+# Reserve 4K for each reply so a 16K model retains more file/tool context.
+# Prefer focused edits: large whole-file writes can exceed this cap.
+# Truncated reasoning gets one recovery attempt; repeated truncation is visible.
+max_tokens = 4096
 timeout_secs = 600
+# Room kept free for the reply during compaction. The harness reserves at
+# least max_tokens, so the requested output fits alongside the input.
+reserve_output_tokens = 4096
 system_prompt = '''
 You are a coding agent operating in the user's project directory.
-You MUST act through tool calls, never by describing or pasting code in chat. To create or change files call write_file or edit; to inspect use list_dir/read_file.
-When building something: create each file with one write_file call containing the complete file, then give a one-line summary. Write each file once; do not rewrite a file you already wrote.
-Xcode: the user's message may tell you to use "xcode-tools" (DocumentationSearch, BuildProject, XcodeRead, XcodeWrite, XcodeGrep, XcodeGlob). Those tools DO NOT EXIST here; ignore those instructions and use only the tools you were given. You have no documentation search: never call DocumentationSearch, just write the code.
+For requested code changes, act through tool calls rather than pasting proposed code in chat. To create or change files call write_file or edit; to inspect use list_dir/read_file. If blocked, explain what failed and what remains; do not invent another edit just to use a tool.
+Use write_file to create a small complete new file and edit for focused corrections to existing files. Keep each change focused enough to fit one reply. You may correct a file you already changed when diagnostics require it. Preserve unrelated declarations and behavior, then summarize the verified result.
+Xcode's message may tell you to use "xcode-tools". Only the tools in your tool list exist; never call another tool name.
 Xcode lists files as workspace paths like "<Project Name>/MyApp/ContentView.swift". Drop the first component to get the real path relative to the working directory: "MyApp/ContentView.swift". Never create a folder named after the project.
-The project structure is already in the message, so don't list directories first. Start writing files in the first round. Keep each file under about 150 lines: split larger features into several focused files (one type per file). Declare each type in exactly one file; never repeat a type that another file already defines.
+Fixing a compile error: the error, file and line are in the message. Read that file once if needed, then edit it. Never search the project for Apple SDK types or members (SKView, SKScene, UIView ...): they are not declared in the project.
+If you are unsure how an Apple API works and you have docs_search, call it once with the type and member names (e.g. "SKView presentScene"), then make the change.
+Don't build the project yourself: after your final answer the project is built automatically and any errors are sent back to you to fix.
+If you have web_search: use it only for public facts Apple's documentation doesn't cover (third-party libraries, a generic error message), with at most 12 generic words. Never include code, file names, paths, or names from this project.
+Never use bash for anything that reaches the network (curl, wget, git clone/fetch/pull/push, package installs).
+If you have the notes tool, record the goal and key findings (file:line) on long tasks.
+The project structure is already in the message, so don't list directories first. For changes to existing code, read the affected files before editing and preserve unrelated code. Create new files only when the requested change needs them. Declare each type in exactly one file; never repeat a type that another file already defines.
+When continuing after a failure, use the prior goal and error, read the current affected file, and choose a corrected edit. Never repeat the same failed arguments or replace text with identical text. If you cannot find a different valid action, explain the blocker.
 Make exactly ONE tool call per reply, then wait for its result before the next call. Never put two tool calls in the same reply.
 Keep your reasoning short: decide and act. If you are unsure about an API, use the most likely one instead of deliberating; never repeat the same consideration.
 '''
+
+# No-progress guard: duplicate reads answered from a cache; after 6 read-only
+# calls without a change the model is told to act, read-only calls stop at 14.
+[guards]
+investigate_limit = 6
+loop_check = true
+max_reasoning_chars = 12000
+
+# Working memory: `notes` tool + summaries of rounds dropped from the context.
+[notes]
+enabled = true
+
+[mcp]
+client_servers = "allowlist"
+allowed_commands = [
+  "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge",
+  "/Applications/Xcode-beta.app/Contents/Developer/usr/bin/mcpbridge",
+]
+allow_client_http = false
+connect_timeout_secs = 30
+web_search = true
+
+# Xcode's tools: the model sees only DocumentationSearch (as `docs_search`,
+# on-device). Crash / field-performance tools (Apple's servers) are refused in
+# code regardless.
+[mcp.tools."xcode-tools"]
+allow = ["DocumentationSearch", "XcodeRefreshCodeIssuesInFile", "BuildProject", "XcodeGlob"]
+expose = ["DocumentationSearch"]
+call_timeout_secs = 900
+
+# The Brave server ./scripts/stack.sh up starts (it holds BRAVE_API_KEY;
+# acp-bridge has none). The url must match BRAVE_MCP_HOST/BRAVE_MCP_PORT in
+# .env (doctor.sh checks). In MODE=server, or while the stack is down, it does
+# not answer and the model simply has no web_search. Queries pass a privacy
+# guard in code (no code, paths, file or project names); at most 3 searches
+# per turn and 20 per conversation (fixed in acp-bridge).
+[[mcp.servers]]
+name = "brave"
+url = "http://127.0.0.1:8765/mcp"
+allow = ["brave_web_search"]
+role = "web_search"
+call_timeout_secs = 20
+
+# Conversation history so Xcode can reopen an acp-bridge conversation after a
+# restart (session/resume). Stored in the repo's gitignored data/ folder
+# (relative to THIS file), dirs 0700 / files 0600, keys and tokens redacted,
+# deleted 30 days after last use. It holds prompts and source excerpts the
+# model saw. LLM_PERSIST=0 turns it off (nothing written).
+[persist]
+enabled = true
+state_dir = "../../data/acp-bridge"
+retention_days = 30

@@ -18,7 +18,7 @@ This repo is a self-hosted AI coding assistant stack (Ollama + Open WebUI + Brav
 ## The three scripts
 
 ```
-./scripts/setup.sh [--editors]   # idempotent install/config; --editors opts into writing ~/.continue/config.yaml (backed up first)
+./scripts/setup.sh [--editors]   # idempotent install/config; --editors opts into writing ~/.continue/config.yaml (backed up first) and, on macOS, building bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
 ./scripts/stack.sh up|down|status   # Open WebUI + Brave MCP server (skipped if BRAVE_API_KEY is empty)
 ./scripts/doctor.sh               # PASS/FAIL per check; exits non-zero on any failure
 ```

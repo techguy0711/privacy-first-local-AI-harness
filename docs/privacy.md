@@ -12,7 +12,19 @@ This directly violates "the only allowed outbound traffic is Brave Search API ca
 
 **acp-bridge — chosen.** A small Rust ACP↔local-model adapter ([BlakeHung/acp-bridge](https://github.com/BlakeHung/acp-bridge)), built specifically because servers like Ollama lack a native agentic tool loop. Verified the same way: downloaded the pinned binary, launched it pointed at `coder-local`, and watched its connections for the full lifecycle (startup, a real `initialize` JSON-RPC handshake, idle). The **only** connection it ever opened was loopback — `127.0.0.1->127.0.0.1:11434` (Ollama itself, to list available models). Zero external hosts contacted, at any point. Its README's claim ("zero outbound network calls beyond the configured endpoint... no telemetry, no update checks") held up under live testing.
 
-**Trade-off accepted**: `acp-bridge` has no MCP support and ignores any `mcpServers` the editor offers (confirmed in its own README) — it brings a fixed, non-extensible tool set instead (`read_file`, `write_file`, `edit`, `list_dir`, `search_code`, `bash`, `git_status`/`diff`/`log`/`commit`). This is what makes the zero-outbound-calls guarantee possible: no Brave Search tool access in Xcode specifically, unlike VS Code/Android Studio via Continue. See `docs/editors.md` for registration steps.
+**Trade-off accepted then**: upstream 0.9.2 has no MCP support and ignores any `mcpServers` the editor offers — a fixed tool set (`read_file`, `write_file`, `edit`, `list_dir`, `search_code`, `bash`, `git_status`/`diff`/`log`/`commit`), so no Brave search and none of Xcode's own tools. Since 2026-10-11 `setup.sh --editors` builds 0.9.2 from source with `editors/acp/acp-bridge.patch`, which adds a small MCP client for exactly those two; the next section covers what that changes. See `docs/editors.md` for registration steps.
+
+## Xcode agent (patched acp-bridge): what can leave the Mac
+
+- **acp-bridge's own traffic stays Brave-only.** acp-bridge itself talks only to the model endpoint and to MCP servers on loopback (`127.0.0.1`, `::1`, `localhost` — checked in code; `HTTP(S)_PROXY`/`ALL_PROXY` are ignored; no redirects off the endpoint's origin). Its one built-in path off the Mac is the guarded `web_search` tool: acp-bridge → the Brave server `stack.sh` starts on `127.0.0.1:8765` (which holds the key) → Brave's Search API, the same path Open WebUI and Continue use. Every query is checked in code before it goes out (refused if it holds code, paths, file names, URLs, key-like strings or names declared in the project; at most 12 words), capped at 3 per turn and 20 per conversation, and logged (`web_search query=...`). acp-bridge's own `web_fetch` stays off (no `LLM_WEB_ALLOWLIST`).
+- **Not covered by that: the `bash` tool.** As in upstream acp-bridge, the model's `bash` tool runs any shell command it writes, in the project folder, with no sandbox and no confirmation step (Xcode shows each command as it runs). A `curl`/`wget`, `git clone`/`fetch`/`pull`/`push`, or a package install run there can reach the network and does **not** pass the `web_search` guard — so for the Xcode agent, hard rules 2 and 3 rest on the model following its prompt (which forbids network commands in `bash`), not on code. Watch the commands it runs and press Stop (it kills the running command) if one reaches out. The build-and-fix loop's own builds run offline for Xcode/SwiftPM, Cargo, Gradle and Go projects (`-disableAutomaticPackageResolution`, `--disable-automatic-resolution`, `--offline`, `GOPROXY=off`); for a `package.json` project it runs the project's own `npm run build` script, which can do anything that script does.
+- **xcode-tools is a local XPC bridge.** Xcode passes its tool server in `session/new` as `/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge` — per static analysis of Xcode 27 (2026-10-09) a stdio↔XPC bridge to the running Xcode with no URL or host strings of its own. acp-bridge starts it only because that canonical path is on its command allowlist (`[mcp] allowed_commands`; any other server an editor passes is ignored) and calls only the curated tools in `[mcp.tools."xcode-tools"] allow`: `DocumentationSearch`, `XcodeRefreshCodeIssuesInFile`, `BuildProject`, `XcodeGlob`. The model sees only `DocumentationSearch` (as `docs_search`), which searches a documentation database installed on the Mac — the query never leaves it. Refused in code whatever the config says: Xcode's Organizer tools that fetch crash and field-performance data from Apple's servers / App Store Connect (IDEAnalyticsKit `GetTopCrashIssues`, `GetCrashIssueLogs`, `GetTopFieldPerformanceIssues`, `GetFieldPerformanceIssueLogs`), `XcodeMessageSend`, and any other open-world tool.
+- **BuildProject is Xcode's own build.** When the project's package dependencies changed, Xcode may resolve and fetch Swift packages, and with automatic signing it may contact Apple's developer services for code signing/provisioning — exactly as for a build you start in Xcode. The `xcodebuild` fallback runs with `-disableAutomaticPackageResolution` and `CODE_SIGNING_ALLOWED=NO`, so it neither fetches packages nor signs.
+- **Apple analytics.** mcpbridge records a CoreAnalytics event (`com.apple.dt.Xcode.IntelligenceToolUse`: process name, Xcode build, the tool used) per tool use (unless Xcode's own telemetry is off). These stay in macOS's local analytics store and are sent to Apple only while **Share Mac Analytics** is on (System Settings → Privacy & Security → Analytics & Improvements) — keep it off. Xcode's own agent/chat telemetry (`com.apple.dt.Xcode.IntelligencePrompt`, `IntelligenceContentDownloads`, `ChatMessageTelemetry`, per the Xcode 27 binaries) is CoreAnalytics too, so the same switch covers it. `doctor.sh` reads that setting (`AutoSubmit` in `/Library/Application Support/CrashReporter/DiagnosticMessagesHistory.plist`, read-only) and prints a WARN when it's on.
+- **Continue's built-in web tools are off.** Continue's own `search_web` sends queries to Continue's cloud proxy (not Brave) and `fetch_url_content` fetches arbitrary URLs; both are disabled in both Continue configs (`chatOptions.toolOverrides`), and `doctor.sh` checks the repo configs and `~/.continue/config.yaml`.
+- **Saved conversations stay local.** acp-bridge stores each conversation (history, notes, metadata) under the repo's gitignored `data/acp-bridge/sessions/` so Xcode can resume it: dirs `0700`, files `0600`, the values of `LLM_API_KEY`/`BRAVE_API_KEY` and other `*_KEY`/`*_TOKEN`/`*_SECRET` env vars plus common token formats redacted before writing, deleted 30 days after last use. They do contain prompts and the source excerpts the model saw — delete the folder to clear them; `LLM_PERSIST=0` in the agent's env turns saving off.
+- **Setup-time traffic** (only when `bin/acp-bridge.stamp` doesn't match the pins, the patches or the installed binary): a `git clone` of `github.com/BlakeHung/acp-bridge` at tag `v0.9.2` (built only if it is the pinned commit) and cargo's crates.io index/crate downloads (exact versions from the upstream `Cargo.lock`, `--locked`), which cargo caches in `~/.cargo/registry` (outside the repo, shared with any other Rust builds on the Mac); with the crates already cached there, the build here fetched nothing (2026-10-11). The Rust toolchain itself (1.86 or newer) is a prerequisite you install with rustup (`sh.rustup.rs`, `static.rust-lang.org`) — `setup.sh` never installs it. The local model pull is now `gemma4:12b` (Ollama's registry, as before).
+- **Not yet re-audited live.** The points above come from the patch's code and its tests against mock MCP/Brave servers (non-loopback URLs never contacted, only the fixed Brave arguments sent, refused queries never arriving). A live connection audit of the patched build inside Xcode with a real Brave query, like the 2026-10-06 one below, is still to do.
 
 ## Confirmed env vars (verified against current docs and a live run, 2026-10-06)
 
@@ -58,9 +70,9 @@ Exercised: chat completion, RAG (file upload → Knowledge → grounded query), 
 
 ### How to disable each
 
-- Brave search entirely: leave `BRAVE_API_KEY` empty in `.env` — `stack.sh` skips launching the Brave MCP server and `doctor.sh` reports `disabled: no key`.
+- Brave search entirely: leave `BRAVE_API_KEY` empty in `.env` — `stack.sh` skips launching the Brave MCP server and `doctor.sh` reports `disabled: no key`. For the Xcode agent alone: `LLM_WEB_SEARCH=off` in its env vars in Xcode.
 - The npm registry check on Brave MCP launch: pre-warm npm's cache once (`npm view @brave/brave-search-mcp-server@2.1.4` or just let the first `stack.sh up` do it) — subsequent launches hit the local npm cache first and only do a brief version check.
-- Ollama's registry traffic: only happens during `ollama pull` in `setup.sh`; once all models are pulled, re-running `setup.sh` makes no registry calls (confirmed: an idempotent second run showed no new pulls, only "no-op" cache-hit lines).
+- Ollama's registry traffic: only happens during `ollama pull` in `setup.sh`. Each run still checks every model's manifest with the registry (`pulling manifest`) and downloads nothing while the model is unchanged (confirmed: an idempotent second run fetched no layers and left the model digests as they were). If upstream moves a tag (e.g. re-publishes `gemma4:12b`), a re-run downloads the new version and rebuilds `coder-<mode>` from it.
 
 ## Localhost-only binding (local mode) — confirmed live
 
@@ -74,3 +86,21 @@ No `0.0.0.0`/`*`/`::` binding on any of the three, confirmed via `lsof -nP -iTCP
 ## Secrets
 
 Confirmed via `git status`/`git check-ignore -v`: `.env`, `.continue/.env`, `data/`, `logs/`, `run/`, and `.venv/` are all correctly gitignored and untracked. No secret has appeared in `git status` or been committed at any point.
+
+## Inference gateway
+
+The gateway binds only to loopback, ignores proxy environment variables and does
+not follow upstream redirects. Its destinations are fixed loopback inference and
+Open WebUI authentication endpoints; clients cannot select arbitrary URLs or
+models. Only text messages are accepted; remote media is refused.
+The shared privacy/system prompt is added server-side for Ollama.
+
+Job bodies and retained results are in RAM only, never written by the gateway.
+Access logging is disabled; backend errors return a generic message rather than
+prompt-bearing response bodies. Memory and retention limits are configurable.
+WebUI/editor conversation storage still has its own existing retention policy.
+
+Open WebUI forwards user identity only on requests authenticated with its private
+service credential. IDE users have personal WebUI keys. The old unauthenticated
+embedding proxy is removed. Public TLS and private-network access rules still
+apply. No new runtime internet service or model family is enabled.

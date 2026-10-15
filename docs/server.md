@@ -1,151 +1,171 @@
-# Server mode — provisioning checklist
+# Server deployment
 
-Same repo, same scripts, same configs as local mode — only `.env` differs (`MODE=server`, plus `SERVER_HOST`). This is a checklist for manually provisioning the shared machine; there's no Terraform or other IaC here by design.
+Deploy a shared coding assistant using Ollama and the inference gateway. Team members connect through a private HTTPS endpoint using individual Open WebUI API keys.
 
-## 1. Instance requirements
+## Prerequisites
 
-Target: AWS Linux with an NVIDIA GPU, or a high-memory Mac. The hard requirement is that `llama3.3:70b` plus a 16384-token context fits **entirely** in GPU memory — after setup, `ollama ps` must show `coder-server` at `100% GPU`, not a CPU/GPU split (a split silently tanks latency).
+Install Ollama and the prerequisites in the [local setup guide](../README.md). Use hardware with enough memory for Llama 3.3 70B and the expected concurrent workload. Team access requires private DNS, TLS, and a reverse proxy. All internal services remain bound to loopback.
 
-- `llama3.3:70b`'s default-quantization download is ~43GB (confirmed via `ollama.com/library/llama3.3`). Ollama has no official per-model VRAM table, but weights alone at ~43GB plus KV cache for a 16K context need comfortable headroom above that.
-- **AWS**: an instance with ≥48GB of **GPU** memory on a single GPU (or a multi-GPU instance where Ollama's tensor split still keeps everything on-GPU) — e.g. `g6e.2xlarge` (1× L40S, 48GB VRAM) or `g5.12xlarge`-class if you need more headroom. Go bigger if you plan to raise `num_ctx` later (see the comment in `Modelfile.server`).
-- **High-memory Mac** (Apple Silicon, unified memory): size so 70B weights + 16K context leaves comfortable headroom under total unified memory — in practice this means a Studio/Max-class machine with well above the ~48GB a single-GPU Linux box would need, since unified memory is shared with the OS and nothing else should be competing for it.
-- Verify after setup with `ollama ps` — confirm `PROCESSOR` reads `100% GPU` for `coder-server`.
+## 1. Configure and install
 
-## 2. Security group / network rules
+For a new installation, copy `.env.example` to `.env`. Preserve the existing file when upgrading. Set:
 
-Expose **only** Open WebUI, and only over TLS, and only from the team's private network or VPN:
+```dotenv
+MODE=server
+SERVER_HOST=ai.internal.example
+QUEUE_ACTIVE=1
+```
 
-- Inbound 443/tcp from the VPN/office CIDR only (not `0.0.0.0/0`).
-- No inbound rule for 11434 (Ollama) or the Brave MCP port — both stay bound to `127.0.0.1` and are only reachable from the reverse proxy running on the same box.
-- Inbound 22/tcp (SSH) from the VPN/office CIDR only, for admin access.
-- Outbound: 443/tcp to the Brave Search API at runtime; outbound to Ollama's model registry (and npm registry, for the Brave MCP package) only during setup — see `docs/privacy.md`.
-
-## 3. Install (same scripts, Linux-native systemd)
+Then run:
 
 ```bash
-git clone <this-repo> && cd <this-repo>
-cp .env.example .env
-# edit .env: MODE=server, BRAVE_API_KEY=..., SERVER_HOST=<the TLS hostname below>
-./scripts/setup.sh
+./scripts/setup.sh --editors
 ```
 
-- Ollama: official Linux installer (`curl -fsSL https://ollama.com/install.sh | sh`) — this is systemd-managed out of the box. Default bind is already `127.0.0.1` (confirmed current default); no override needed unless something in your image sets `OLLAMA_HOST` otherwise. If it does, fix it with a drop-in, not a shell export (shell-exported vars don't reach the systemd-managed daemon):
-  ```bash
-  sudo systemctl edit ollama.service
-  # [Service]
-  # Environment="OLLAMA_HOST=127.0.0.1:11434"
-  sudo systemctl daemon-reload && sudo systemctl restart ollama
-  ```
-- Cloud disable: `setup.sh` already merges `disable_ollama_cloud: true` into `~/.ollama/server.json` for whichever user runs it — run `setup.sh` as the same user/account that owns the `ollama` systemd service's home directory, or the setting won't apply to the service.
+Setup prepares the approved Ollama chat model, Nomic embeddings, the gateway, and editor configuration. Increase concurrency only after measuring the workload on the intended hardware.
 
-## 4. systemd units (Open WebUI, Brave MCP)
-
-Ollama already ships its own unit. Open WebUI and the Brave MCP server don't — add these two. No Docker: both run fine natively via the same `uv`-managed venv and `npx` invocation `setup.sh`/`stack.sh` already use locally; Docker would only add an extra layer with no concrete benefit here.
-
-`/etc/systemd/system/openwebui.service`:
-```ini
-[Unit]
-Description=Open WebUI
-After=network.target ollama.service
-
-[Service]
-Type=simple
-User=openwebui
-WorkingDirectory=/opt/coder-stack          # path to this repo on the server
-EnvironmentFile=/opt/coder-stack/.env
-Environment=DATA_DIR=/opt/coder-stack/data/openwebui
-Environment=WEBUI_AUTH=true
-Environment=DEFAULT_MODELS=coder-server:latest
-Environment=RAG_EMBEDDING_ENGINE=ollama
-Environment=ENABLE_RAG_HYBRID_SEARCH=false
-Environment=OFFLINE_MODE=true
-Environment=HF_HUB_OFFLINE=1
-Environment=ENABLE_VERSION_UPDATE_CHECK=false
-Environment=ENABLE_COMMUNITY_SHARING=false
-Environment=DO_NOT_TRACK=true
-Environment=SCARF_NO_ANALYTICS=true
-Environment=ANONYMIZED_TELEMETRY=false
-Environment=ENABLE_WEB_SEARCH=false
-# `open-webui serve` ignores HOST/PORT env vars -- confirmed by running it;
-# it's a Click CLI with its own --host/--port flags (default 0.0.0.0:8080).
-# See docs/privacy.md. CLI flags are the only mechanism that actually works.
-ExecStart=/opt/coder-stack/.venv/openwebui/bin/open-webui serve --host 127.0.0.1 --port 3000
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-(`RAG_EMBEDDING_MODEL` and `WEBUI_SECRET_KEY` come from the `EnvironmentFile` since they're already in `.env`. `DEFAULT_MODELS` needs the `:latest` suffix -- confirmed via `GET /api/models` -- because `ollama create coder-server` with no explicit tag produces `coder-server:latest`.)
-
-`/etc/systemd/system/brave-mcp.service`:
-```ini
-[Unit]
-Description=Brave Search MCP server
-After=network.target
-
-[Service]
-Type=simple
-User=openwebui
-WorkingDirectory=/opt/coder-stack
-EnvironmentFile=/opt/coder-stack/.env
-Environment=BRAVE_MCP_TRANSPORT=http
-ExecStart=/usr/bin/npx -y @brave/brave-search-mcp-server@%BRAVE_MCP_VERSION% --transport http --host 127.0.0.1 --port 8765
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-(Replace `%BRAVE_MCP_VERSION%` with the pinned value from `.env` — systemd doesn't expand `EnvironmentFile` values inside `ExecStart`, so bake the version into the line, or wrap it in a one-line shell script that sources `.env` first.)
+## 2. Start and verify
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now openwebui brave-mcp
+./scripts/stack.sh up
+./scripts/doctor.sh
 ```
 
-Register the Brave MCP server in Open WebUI once, the same manual admin-panel step as local mode (Settings → Admin Settings → Integrations → Add Connection → MCP (Streamable HTTP) → `http://127.0.0.1:8765`).
+Ollama runs separately through its app or service. The stack script manages the gateway, Open WebUI, and optional Brave MCP server. Their logs are under `logs/`.
 
-## 5. TLS reverse proxy
+## 3. Configure private HTTPS access
 
-Terminate TLS in front of Open WebUI only. Example (Caddy, for brevity — nginx works the same way):
+Expose only the reverse proxy to the team network or VPN. On AWS, allow inbound TCP 443 from the team network and TCP 22 from administrator addresses. Do not expose the internal service ports directly.
 
-```
-<SERVER_HOST> {
-    # Continue's OpenAI-compatible client
-    reverse_proxy /api/* 127.0.0.1:3000
+Configure the proxy with these routes:
 
-    # Xcode's "Internet Hosted" flow expects /v1/chat/completions; Open
-    # WebUI's own OpenAI-compatible route is /api/chat/completions.
-    handle /v1/chat/completions {
-        rewrite * /api/chat/completions
+| Public route | Internal destination |
+|---|---|
+| `/v1/*` | Gateway at `127.0.0.1:8787` |
+| All other paths | Open WebUI at `127.0.0.1:3000` |
+
+Example Caddy configuration, using the default ports:
+
+```caddy
+ai.internal.example {
+    handle /v1/* {
+        reverse_proxy 127.0.0.1:8787 {
+            flush_interval -1
+        }
+    }
+    handle {
         reverse_proxy 127.0.0.1:3000
     }
-
-    # Continue's embed-role client, mapped straight to Ollama (never exposed
-    # directly otherwise) since Open WebUI doesn't expose embeddings
-    # externally. Network access here is already VPN-gated by the security
-    # group above; add a bearer-token check in the proxy if you want
-    # per-request auth on this path too.
-    handle_path /ollama-embed/* {
-        rewrite * /v1/embeddings
-        reverse_proxy 127.0.0.1:11434
-    }
-
-    # Everything else: the normal Open WebUI chat UI
-    reverse_proxy 127.0.0.1:3000
 }
 ```
 
-Issue the TLS cert however your team normally does (ACME/Let's Encrypt via the proxy, or an internal CA) — out of scope here beyond "terminate TLS before Open WebUI."
+Replace the hostname and configure certificate issuance through the team's certificate authority. Set proxy and client deadlines longer than the combined queue and inference limits—900 seconds with the default settings. Disable response buffering for streaming routes.
 
-## 6. Editor access (per-user API keys)
+When upgrading from the direct Ollama proxy configuration, remove `/ollama-embed`. Embeddings now use the authenticated gateway.
 
-- Each developer gets their own Open WebUI account and generates their own API key: Open WebUI → Settings → Account → API Keys.
-- They set `OPENWEBUI_API_KEY` in their own Continue secrets file (`~/.continue/.env` or workspace `.continue/.env`) and `SERVER_HOST` in this repo's `.env` on their laptop, then run `./scripts/setup.sh --editors`.
-- Xcode: "Internet Hosted" → URL `https://<SERVER_HOST>` → API Key = the same per-user `sk-...` key (see `docs/editors.md`).
+## 4. Grant team access
 
-## 7. Verification
+1. Open the private HTTPS endpoint and create the administrator account.
+2. Create or approve an Open WebUI account for each team member.
+3. Have each member generate a personal API key in **Settings → Account → API Keys**.
+4. Configure the editor with API base `https://ai.internal.example/v1` and model `coder-server:latest`.
+5. Complete the client-specific steps in the [editor guide](editors.md).
 
-- `ollama ps` → `coder-server` at `100% GPU`.
-- `curl -s https://<SERVER_HOST>/v1/chat/completions -H "Authorization: Bearer sk-..." -d '{"model":"coder-server:latest","messages":[{"role":"user","content":"ping"}]}'` returns a completion (the `:latest` suffix is required here -- this goes through Open WebUI's own model registry, not Ollama directly).
-- `./scripts/doctor.sh` with `MODE=server` in `.env` — same checks as local mode, run on the server itself.
-- From a developer laptop with `MODE=server`: Continue chat and the Brave MCP tool both work against the proxied endpoint.
+The gateway validates personal keys through Open WebUI's `/api/v1/auths/` endpoint. Include that route if API-key endpoint restrictions are enabled. Pending accounts cannot submit requests.
+
+`GATEWAY_SERVICE_KEY` is an internal credential for Open WebUI. Do not distribute it to team members. Keep secrets in the gitignored `.env` files described in the editor guide.
+
+## 5. Verify before rollout
+
+On the target hardware, verify:
+
+- Chat completions and tool calls work with the selected checkpoint.
+- Requests from separate accounts are queued and processed fairly.
+- Cancelling queued and running requests releases their capacity.
+- An interrupted Xcode queue connection resumes the same job.
+- Expected concurrent usage stays within acceptable latency and memory limits.
+
+Increase `QUEUE_ACTIVE` only after measuring the server under representative coding workloads. Run one gateway worker; multiple workers do not share queue state.
+
+For unattended operation, configure process supervision with launchd on macOS or systemd on Linux. Preserve the working directory and environment used by `stack.sh`. The scripts do not provide automatic restart supervision or high availability.
+
+## Operations
+
+### Stop or restart
+
+```bash
+./scripts/stack.sh down
+./scripts/stack.sh up
+```
+
+Restart after changing `.env`. The launcher rejects configuration changes while the existing gateway is running. A restart discards queued jobs and retained results.
+
+### Change deployment mode
+
+`MODE=local` uses `coder-local:latest` based on Gemma 4 12B. `MODE=server` uses `coder-server:latest` based on Llama 3.3 70B. Both use Ollama. Server mode requires hardware sized for the 70B model; do not use it for a 16GB Mac test.
+
+After changing `MODE`, rerun setup to prepare the selected model and regenerate editor configuration where needed.
+
+### Test queues locally
+
+Use an existing [local Ollama installation](../README.md#start-here-local-mac-setup) with `QUEUE_ACTIVE=1`. Configure the Xcode agent as described in the [editor guide](editors.md#queue-aware-xcode-transport-2026-10-11), then submit two requests and cancel one while it is waiting.
+
+Local IDE requests share one user identity. For automated tests covering separate users, reconnects, overload, and cancellation:
+
+```bash
+.venv/openwebui/bin/python -m unittest discover -s tests -v
+```
+
+These tests use simulated inference responses and require no model downloads.
+
+## Configuration reference
+
+Edit settings in `.env`; [.env.example](../.env.example) contains the complete list.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `QUEUE_ACTIVE` | `1` | Maximum concurrent chat and embedding requests |
+| `QUEUE_WAITING` | `32` | Maximum waiting requests |
+| `QUEUE_PER_USER` | `2` | Maximum active and waiting requests per account |
+| `QUEUE_WAIT_SECONDS` | `300` | Maximum time waiting for capacity |
+| `INFERENCE_TIMEOUT_SECONDS` | `600` | Maximum inference duration |
+| `QUEUE_RETENTION_SECONDS` | `300` | Retention after a job finishes |
+| `QUEUE_MAX_JOBS` | `128` | Maximum jobs, including retained results |
+| `QUEUE_MAX_BODY_BYTES` | `1048576` | Maximum request size |
+| `QUEUE_MAX_RESULT_BYTES` | `4194304` | Maximum result size |
+
+Scheduling rotates between accounts and preserves arrival order within each account. Running requests are not preempted. Queue positions may change as other accounts submit work. Capacity limits return HTTP 429 with `Retry-After`.
+
+Open WebUI uses the gateway for chat and embeddings. Persistent WebUI configuration overrides are disabled; environment-controlled settings are reapplied on restart. WebUI requests without forwarded user identity share the internal service quota.
+
+## Client and API behavior
+
+| Client | Queue behavior |
+|---|---|
+| Xcode ACP with `LLM_QUEUE=1` | Separate activity notifications, job polling, reconnects, and cancellation |
+| Continue | Standard streaming with keepalives; no queue-position display |
+| Xcode plain chat | Standard completion API; no job-reconnect integration |
+
+Standard clients use `/v1/chat/completions` and `/v1/embeddings`. Streaming keepalives are SSE comments and do not become assistant text. Disconnecting a standard request cancels it. Failures after streaming begins are reported in the stream because the HTTP response has already started.
+
+Queue-aware clients use:
+
+| Endpoint | Action |
+|---|---|
+| `POST /v1/jobs` | Submit a chat request with `stream=false` |
+| `GET /v1/jobs/{id}` | Read status or the completed result |
+| `DELETE /v1/jobs/{id}` | Cancel a queued or running request |
+
+Supply a stable `Idempotency-Key` when submitting a job. Within its retention period, repeating the same request returns the same job; reusing the key with a different request returns HTTP 409. Only the job owner can read or cancel it.
+
+### Limitations
+
+- Jobs and results are stored in memory. Reconnects require the same gateway process and an unexpired job; server restarts lose them.
+- A failed cancellation request can leave inference running until its deadline. Confirm GPU resource release on the selected backend.
+- Multiple gateway replicas and durable job recovery are not supported.
+- Automated tests do not establish server performance or IDE rendering compatibility. Complete the rollout checks on the target hardware and editor versions.
+
+## Related documentation
+
+- [Editor configuration](editors.md)
+- [Privacy and outbound traffic](privacy.md)

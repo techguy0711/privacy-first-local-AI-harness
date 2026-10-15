@@ -6,8 +6,10 @@
 # Native Open WebUI install (repo-local venv)
 .venv/
 
-# Downloaded acp-bridge binary (pinned version re-fetched by setup.sh --editors)
+# acp-bridge built by setup.sh --editors: binary + stamp (bin/), source
+# checkout and cargo output (build/)
 bin/
+build/
 
 # Runtime data and logs
 data/
@@ -19,3 +21,7 @@ run/
 
 # OS cruft
 .DS_Store
+
+# Python bytecode
+__pycache__/
+*.pyc

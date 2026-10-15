@@ -1,0 +1,2441 @@
+--- a/src/acp.rs
++++ b/src/acp.rs
+@@ -103,6 +103,25 @@ pub fn notify_thought_for(version: ProtocolVersion, session_id: &str, text: &str
+     send_session_update(session_id, thought_update(version, text, message_id));
+ }
+ 
++/// Build a v1 `notice`: live information for the user that is not part of
++/// the session history (stable since ACP schema v1.25.0). Agents may only
++/// send it to Clients that advertised `clientCapabilities.session.notices`.
++pub fn notice_update(severity: &str, title: &str) -> Value {
++    json!({
++        "sessionUpdate": "notice",
++        "severity": severity,
++        "title": title
++    })
++}
++
++/// Notify a `notice` (no-op for empty text; the title is required).
++pub fn notify_notice(session_id: &str, severity: &str, title: &str) {
++    if title.trim().is_empty() {
++        return;
++    }
++    send_session_update(session_id, notice_update(severity, title));
++}
++
+ /// Display content attached to a tool call (ACP `ToolCallContent`).
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum ToolCallContent {
+@@ -867,6 +886,15 @@ mod tests {
+         assert!(payload.get("messageId").is_none());
+     }
+ 
++    #[test]
++    fn notice_payload_matches_v1_schema() {
++        let payload = notice_update("info", "Waiting for the inference server");
++        assert_eq!(payload["sessionUpdate"], "notice");
++        assert_eq!(payload["severity"], "info");
++        assert_eq!(payload["title"], "Waiting for the inference server");
++        assert!(payload.get("content").is_none(), "not a content chunk");
++    }
++
+     #[test]
+     fn v2_thought_chunk_carries_required_message_id() {
+         let payload = thought_update(ProtocolVersion::V2, "why", "m-1-thought-1");
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -302,8 +302,17 @@ mod tests {
+     use super::{ConfigFile, LlmSection};
+     use crate::verify::VerifyMode;
+ 
++    /// Tests that set or clear process env vars run one at a time (they
++    /// share the process environment with every other test thread).
++    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
++
++    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
++        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
++    }
++
+     #[test]
+     fn llm_config_uses_system_prompt_from_file_when_env_missing() {
++        let _env = env_lock();
+         std::env::remove_var("LLM_SYSTEM_PROMPT");
+ 
+         let cfg = ConfigFile {
+@@ -320,6 +329,7 @@ mod tests {
+ 
+     #[test]
+     fn verify_table_is_read_and_env_overrides_it() {
++        let _env = env_lock();
+         for k in ["LLM_VERIFY", "LLM_VERIFY_MAX_ATTEMPTS", "LLM_VERIFY_TIMEOUT_SECS"] {
+             std::env::remove_var(k);
+         }
+@@ -363,6 +373,7 @@ mod tests {
+ 
+     #[test]
+     fn investigate_limit_from_file_and_env() {
++        let _env = env_lock();
+         std::env::remove_var("LLM_INVESTIGATE_LIMIT");
+         let cfg: ConfigFile = toml::from_str("[guards]\ninvestigate_limit = 9\n").unwrap();
+         assert_eq!(cfg.into_llm_config().agent.investigate_limit, 9);
+@@ -376,6 +387,7 @@ mod tests {
+ 
+     #[test]
+     fn reserve_output_tokens_from_file_env_and_default() {
++        let _env = env_lock();
+         std::env::remove_var("LLM_RESERVE_OUTPUT_TOKENS");
+         std::env::remove_var("LLM_MAX_TOKENS");
+         let cfg: ConfigFile = toml::from_str("[llm]\nmax_tokens = 8192\n").unwrap();
+@@ -413,6 +425,7 @@ mod tests {
+ 
+     #[test]
+     fn repo_config_parses_as_is_and_as_proposed() {
++        let _env = env_lock();
+         for k in ["LLM_RESERVE_OUTPUT_TOKENS", "LLM_INVESTIGATE_LIMIT", "LLM_MCP", "LLM_WEB_SEARCH", "LLM_NOTES", "LLM_LOOP_CHECK", "LLM_MAX_TOKENS", "LLM_SYSTEM_PROMPT", "LLM_PERSIST", "LLM_STATE_DIR", "LLM_SESSION_RETENTION_DAYS"] {
+             std::env::remove_var(k);
+         }
+@@ -461,6 +474,7 @@ mod tests {
+ 
+     #[test]
+     fn llm_config_env_system_prompt_overrides_file() {
++        let _env = env_lock();
+         std::env::set_var("LLM_SYSTEM_PROMPT", "from env");
+ 
+         let cfg = ConfigFile {
+--- a/src/context.rs
++++ b/src/context.rs
+@@ -6,13 +6,24 @@
+ //! oldest-first. The stored session history is never modified.
+ //!
+ //! Shrinking steps, each stopping as soon as the request fits:
++//! 0. replace older copies of a file that was read again later (lossless)
++//!    and copies a later edit made out of date,
+ //! 1. elide file contents in old `write_file` / `edit` arguments (and drop
+ //!    old reasoning text),
+-//! 2. truncate old tool results,
++//! 2. truncate old tool results, except the latest read of each file,
+ //! 3. drop whole old rounds (an assistant tool-call message together with
+-//!    all of its tool results, so no call or result is ever orphaned),
++//!    all of its tool results, so no call or result is ever orphaned);
++//!    rounds holding the latest read of a file go last, after the recent
++//!    rounds' reasoning,
+ //! 4. as a last resort, steps 1–2 on the recent rounds too.
+ //!
++//! A file read is what the model copies `edit` old_text from. Dropping it
++//! while it is still the only copy makes the model read it again, which in
++//! a small window pushes out the next file: a re-read loop. A read that a
++//! later edit made out of date is the opposite: kept, it makes the model
++//! retry edits against text that is gone, so it is never protected and the
++//! engine replaces it in every request ([`mark_stale_reads`]).
++//!
+ //! The system prompt, the turn's user message and the latest user message
+ //! are never changed or dropped. The system message stays byte-identical
+ //! (so the backend's cached prompt prefix stays valid); when rounds were
+@@ -20,6 +31,7 @@
+ //! the request (see `notes`).
+ 
+ use serde_json::Value;
++use std::collections::{HashMap, HashSet};
+ 
+ /// Characters per token used for the estimate (conservative for code).
+ const CHARS_PER_TOKEN: f64 = 3.5;
+@@ -37,6 +49,33 @@ const RECENT_GROUPS: usize = 4;
+ const OLD_RESULT_CHARS: usize = 400;
+ /// Marker ending a truncated tool result.
+ const TRUNCATED_MARK: &str = "characters of this old tool result elided]";
++/// Start of the marker that replaces a superseded file read.
++const SUPERSEDED_MARK: &str = "[Older copy of ";
++/// End of the marker that replaces file contents in old `write_file` /
++/// `edit` arguments.
++const ELIDED_MARK: &str = " elided - call read_file for the current version]";
++/// Start of the message that replaces the latest failed edit's call.
++const RECOVERY_MARK: &str = "Previous edit failed. Recovery evidence:";
++
++/// Every text the bridge puts into the model's view in place of, or
++/// attached to, real content (here, in `guards`, `notes` and the engine's
++/// dropped-context line). None of it belongs in a file: a `write_file` /
++/// `edit` that writes one copied a placeholder, and `guards` refuses it.
++/// A new marker must be added here.
++pub fn harness_markers() -> [&'static str; 10] {
++    [
++        ELIDED_MARK,
++        TRUNCATED_MARK,
++        SUPERSEDED_MARK,
++        RECOVERY_MARK,
++        crate::guards::DUPLICATE_POINTER_MARK,
++        crate::guards::DUPLICATE_FULL_MARK,
++        crate::guards::HINT_MARK,
++        crate::notes::NOTES_TAG,
++        crate::notes::FILE_STATE_TAG,
++        crate::engine::DROPPED_NOTE_PLAIN.trim_start(),
++    ]
++}
+ 
+ /// Prompt-token budget for a model with `context_size` tokens when
+ /// `reserve_tokens` are kept free for the reply (the engine passes
+@@ -86,6 +125,35 @@ pub fn estimate_request_tokens(messages: &[Value], overhead_chars: usize) -> u64
+     tokens_for_chars(overhead_chars + messages.iter().map(message_chars).sum::<usize>())
+ }
+ 
++/// Keep the latest failed edit's evidence but remove its invalid argument
++/// example and older failed exchanges from the request copy. Stored history
++/// stays untouched. Only complete single-call exchanges are transformed.
++pub fn remove_failed_edit_examples(messages: &mut Vec<Value>) {
++    let mut failed = Vec::new();
++    for i in 0..messages.len().saturating_sub(1) {
++        let Some(calls) = messages[i].get("tool_calls").and_then(Value::as_array) else { continue; };
++        if calls.len() != 1 { continue; }
++        let name = calls[0]["function"]["name"].as_str().unwrap_or("");
++        let result = &messages[i + 1];
++        let text = result["content"].as_str().unwrap_or("");
++        let id_matches = calls[0].get("id").map_or(true, |id| result.get("tool_call_id") == Some(id));
++        if name == "edit" && result["role"] == "tool" && id_matches
++            && (text.starts_with("Error") || text.starts_with("Not run")) {
++            failed.push(i);
++        }
++    }
++    let last = failed.last().copied();
++    for i in failed.into_iter().rev() {
++        if Some(i) == last {
++            let text = messages[i + 1]["content"].as_str().unwrap_or("");
++            messages[i] = serde_json::json!({"role":"assistant", "content":format!("{RECOVERY_MARK}\n{text}")});
++            messages.remove(i + 1);
++        } else {
++            messages.drain(i..i + 2);
++        }
++    }
++}
++
+ /// What [`fit_messages`] did.
+ #[derive(Debug, Default, Clone, PartialEq, Eq)]
+ pub struct FitReport {
+@@ -97,6 +165,8 @@ pub struct FitReport {
+     pub elided: usize,
+     /// Tool results truncated.
+     pub truncated: usize,
++    /// Older copies of a file read again later, replaced by a marker.
++    pub superseded: usize,
+     /// Messages dropped.
+     pub dropped: usize,
+     /// Indices (into the input) of the dropped messages, ascending.
+@@ -105,7 +175,7 @@ pub struct FitReport {
+ 
+ impl FitReport {
+     pub fn changed(&self) -> bool {
+-        self.elided + self.truncated + self.dropped > 0
++        self.superseded + self.elided + self.truncated + self.dropped > 0
+     }
+ 
+     pub fn fits(&self) -> bool {
+@@ -148,13 +218,150 @@ fn groups(messages: &[Value], start: usize) -> Vec<Vec<usize>> {
+     out
+ }
+ 
++/// Each call in `group` with the index of its result: results carry the
++/// call's id (OpenAI) or follow the message in call order (Ollama).
++fn call_results<'a>(msgs: &'a [Value], group: &[usize]) -> Vec<(&'a Value, usize)> {
++    let Some(calls) = msgs[group[0]].get("tool_calls").and_then(Value::as_array) else {
++        return Vec::new();
++    };
++    calls
++        .iter()
++        .enumerate()
++        .filter_map(|(k, call)| {
++            let by_id = call.get("id").and_then(|id| {
++                group[1..].iter().copied().find(|&r| msgs[r].get("tool_call_id") == Some(id))
++            });
++            by_id.or_else(|| group.get(1 + k).copied()).map(|r| (call, r))
++        })
++        .collect()
++}
++
++/// The path a `read_file` call names.
++fn read_path(call: &Value) -> Option<String> {
++    call_path(call, &["read_file"])
++}
++
++/// The path a call to one of `tools` names.
++fn call_path(call: &Value, tools: &[&str]) -> Option<String> {
++    let func = call.get("function")?;
++    if !tools.contains(&func.get("name")?.as_str()?) {
++        return None;
++    }
++    let args = match func.get("arguments")? {
++        Value::String(s) => serde_json::from_str::<Value>(s).ok()?,
++        v => v.clone(),
++    };
++    let path = args.get("path")?.as_str()?.trim().trim_start_matches("./");
++    (!path.is_empty()).then(|| path.to_string())
++}
++
++/// Whether a tool result holds a file's text, not an error, a refusal, a
++/// pointer to an earlier result or an already shortened copy.
++fn is_full_read(m: &Value) -> bool {
++    m.get("content").and_then(Value::as_str).is_some_and(|t| {
++        !(t.starts_with("Error")
++            || t.starts_with("Not run")
++            || t.starts_with(crate::guards::DUPLICATE_POINTER_MARK)
++            || t.starts_with(SUPERSEDED_MARK)
++            || t.ends_with(TRUNCATED_MARK))
++    })
++}
++
++/// Whether a tool result reports a successful `edit` / `write_file`.
++fn is_change(m: &Value) -> bool {
++    m.get("content")
++        .and_then(Value::as_str)
++        .is_some_and(|t| t.starts_with("patched ") || t.starts_with("wrote "))
++}
++
++/// A full read whose file a later successful edit or write changed.
++fn stale_marker(path: &str) -> String {
++    format!("{SUPERSEDED_MARK}{path} omitted - the file was changed in a later round, so this text is out of date. Use that change's result, or read_file again before editing it.]")
++}
++
++fn reread_marker(path: &str) -> String {
++    format!("{SUPERSEDED_MARK}{path} omitted - it was read again later; use the later result.]")
++}
++
++/// Full `read_file` results in `groups`: the indices of the current one
++/// per path (the latest, unless a later edit changed the file), and the
++/// others with the marker that replaces them and whether they are stale
++/// (out of date) rather than merely repeated.
++fn file_reads(msgs: &[Value], groups: &[Vec<usize>]) -> (HashSet<usize>, Vec<(usize, String, bool)>) {
++    let mut reads: Vec<(usize, String)> = Vec::new();
++    let mut changes: HashMap<String, usize> = HashMap::new();
++    for g in groups {
++        for (call, r) in call_results(msgs, g) {
++            if let Some(path) = read_path(call).filter(|_| is_full_read(&msgs[r])) {
++                reads.push((r, path));
++            } else if let Some(path) = call_path(call, &["edit", "write_file"]).filter(|_| is_change(&msgs[r])) {
++                let last = changes.entry(path).or_default();
++                *last = (*last).max(r);
++            }
++        }
++    }
++    reads.sort();
++    let mut latest: HashMap<&str, usize> = HashMap::new();
++    for (r, path) in &reads {
++        latest.insert(path, *r);
++    }
++    let latest: HashSet<usize> = latest.into_values().collect();
++    let mut current = HashSet::new();
++    let mut replaced = Vec::new();
++    for (r, path) in reads {
++        if changes.get(&path).is_some_and(|&c| c > r) {
++            replaced.push((r, stale_marker(&path), true));
++        } else if latest.contains(&r) {
++            current.insert(r);
++        } else {
++            replaced.push((r, reread_marker(&path), false));
++        }
++    }
++    (current, replaced)
++}
++
++/// Replace every file read that a later successful `edit` / `write_file`
++/// of the same file made out of date (the request copy only; returns how
++/// many). The model copies `old_text` from what it last read, so a
++/// pre-edit copy leads to edits against text that no longer exists.
++pub fn mark_stale_reads(messages: &mut [Value]) -> usize {
++    let (_, replaced) = file_reads(messages, &groups(messages, 0));
++    let mut n = 0;
++    for (i, marker, stale) in replaced {
++        if stale {
++            messages[i]["content"] = Value::String(marker);
++            n += 1;
++        }
++    }
++    n
++}
++
++/// Tool-call ids whose results are in `request` as they are in `history`
++/// (a notes block may follow), i.e. what the model can still read.
++pub fn intact_results(history: &[Value], request: &[Value]) -> HashSet<String> {
++    let stored: HashMap<&str, &str> = history
++        .iter()
++        .filter(|m| role(m) == "tool")
++        .filter_map(|m| Some((m.get("tool_call_id")?.as_str()?, m.get("content")?.as_str()?)))
++        .collect();
++    request
++        .iter()
++        .filter(|m| role(m) == "tool")
++        .filter_map(|m| {
++            let id = m.get("tool_call_id")?.as_str()?;
++            let text = m.get("content")?.as_str()?;
++            stored.get(id).is_some_and(|s| text.starts_with(s)).then(|| id.to_string())
++        })
++        .collect()
++}
++
+ fn elision_marker(path: &str) -> String {
+-    format!("[contents of {path} elided - call read_file for the current version]")
++    format!("[contents of {path}{ELIDED_MARK}")
+ }
+ 
+-/// Elide the file contents of `write_file` / `edit` calls and drop the
+-/// reasoning text of an assistant message. Returns whether it changed.
+-fn elide_message(m: &mut Value) -> bool {
++/// Drop the reasoning text of an assistant message. Returns whether it
++/// changed.
++fn drop_reasoning(m: &mut Value) -> bool {
+     let mut changed = false;
+     if let Some(obj) = m.as_object_mut() {
+         for key in ["reasoning", "reasoning_content", "thinking"] {
+@@ -164,6 +371,13 @@ fn elide_message(m: &mut Value) -> bool {
+             }
+         }
+     }
++    changed
++}
++
++/// Elide the file contents of `write_file` / `edit` calls and drop the
++/// reasoning text of an assistant message. Returns whether it changed.
++fn elide_message(m: &mut Value) -> bool {
++    let mut changed = drop_reasoning(m);
+     let Some(calls) = m.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+         return changed;
+     };
+@@ -262,6 +476,14 @@ pub fn fit_messages(
+     } else {
+         0
+     };
++    // A short follow-up such as "continue" still needs the original goal.
++    if let Some(first_user) = msgs.iter().position(|m| role(m) == "user") {
++        // An oversized old request must not permanently block a shorter
++        // follow-up. It can be summarized; the current user turn stays intact.
++        if tokens_for_chars(sizes[first_user]) <= budget_tokens / 2 {
++            keep.push(first_user);
++        }
++    }
+     if let Some(last_user) = msgs.iter().rposition(|m| role(m) == "user") {
+         keep.push(last_user);
+     }
+@@ -271,25 +493,50 @@ pub fn fit_messages(
+     let old_count = all_groups.len().saturating_sub(RECENT_GROUPS);
+     let mut dropped = vec![false; msgs.len()];
+ 
+-    // Steps 1-2 over the given groups; true once the request fits.
++    // Step 0: an older copy of a file that was read again later, or one a
++    // later edit made out of date (the engine marks those every round, see
++    // `mark_stale_reads`).
++    let (latest, older) = file_reads(&msgs, &all_groups);
++    let mut done = false;
++    for (i, marker, _) in older {
++        if keep.contains(&i) {
++            continue;
++        }
++        msgs[i]["content"] = Value::String(marker);
++        let new = message_chars(&msgs[i]);
++        total = total - sizes[i] + new;
++        sizes[i] = new;
++        report.superseded += 1;
++        if fits(total) {
++            done = true;
++            break;
++        }
++    }
++
++    // Steps 1 (0 here: elide; 2: reasoning only) and 2 (1 here: truncate)
++    // over the given groups, leaving the results in `spare` whole; true
++    // once it fits.
+     let shrink = |groups: &[Vec<usize>],
++                      steps: &[u8],
++                      spare: &HashSet<usize>,
+                       msgs: &mut Vec<Value>,
+                       sizes: &mut Vec<usize>,
+                       total: &mut usize,
+                       report: &mut FitReport|
+      -> bool {
+-        for (step, g) in [0, 1].iter().flat_map(|s| groups.iter().map(move |g| (*s, g))) {
++        for (step, g) in steps.iter().flat_map(|s| groups.iter().map(move |g| (*s, g))) {
+             for &i in g {
+-                if keep.contains(&i) {
++                if keep.contains(&i) || spare.contains(&i) {
+                     continue;
+                 }
+                 let changed = match (step, role(&msgs[i])) {
+                     (0, "assistant") => elide_message(&mut msgs[i]),
+                     (1, "tool") => truncate_result(&mut msgs[i]),
++                    (2, "assistant") => drop_reasoning(&mut msgs[i]),
+                     _ => false,
+                 };
+                 if changed {
+-                    if step == 0 {
++                    if step != 1 {
+                         report.elided += 1;
+                     } else {
+                         report.truncated += 1;
+@@ -306,12 +553,23 @@ pub fn fit_messages(
+         false
+     };
+ 
+-    let mut done = shrink(&all_groups[..old_count], &mut msgs, &mut sizes, &mut total, &mut report);
+-
+-    // Step 3: drop whole old groups, oldest first.
+     if !done {
++        done = shrink(&all_groups[..old_count], &[0, 1], &latest, &mut msgs, &mut sizes, &mut total, &mut report);
++    }
++
++    // Step 3: drop whole old groups, oldest first. Before the groups that
++    // hold the latest read of a file go, the recent rounds lose their
++    // reasoning: the reads are what edits copy old_text from.
++    let holds_latest = |g: &Vec<usize>| g.iter().any(|i| latest.contains(i));
++    for second in [false, true] {
++        if !done && second {
++            done = shrink(&all_groups[old_count..], &[2], &latest, &mut msgs, &mut sizes, &mut total, &mut report);
++        }
++        if done {
++            break;
++        }
+         for g in &all_groups[..old_count] {
+-            if g.iter().any(|i| keep.contains(i)) {
++            if holds_latest(g) != second || g.iter().any(|i| keep.contains(i)) {
+                 continue;
+             }
+             for &i in g {
+@@ -326,9 +584,26 @@ pub fn fit_messages(
+         }
+     }
+ 
+-    // Step 4: steps 1-2 on the recent groups too.
++    // Step 4: steps 1-2 on the recent groups too, file reads last.
+     if !done {
+-        shrink(&all_groups[old_count..], &mut msgs, &mut sizes, &mut total, &mut report);
++        done = shrink(&all_groups[old_count..], &[0, 1], &latest, &mut msgs, &mut sizes, &mut total, &mut report);
++    }
++    if !done {
++        shrink(&all_groups[old_count..], &[0, 1], &HashSet::new(), &mut msgs, &mut sizes, &mut total, &mut report);
++    }
++
++    // If recent tool traffic alone is too large, compact whole recent groups
++    // too. Protected instructions remain intact; calls/results stay paired.
++    if !fits(total) {
++        for g in &all_groups[old_count..] {
++            if g.iter().any(|i| keep.contains(i)) { continue; }
++            for &i in g {
++                dropped[i] = true;
++                total -= sizes[i];
++                report.dropped += 1;
++            }
++            if fits(total) { break; }
++        }
+     }
+ 
+     report.dropped_indices = dropped
+@@ -428,6 +703,33 @@ mod tests {
+         assert!(value_chars(&openai) < IMAGE_CHARS + 100);
+     }
+ 
++    #[test]
++    fn followup_keeps_original_goal_and_compacts_recent_tool_pairs() {
++        let mut m = vec![json!({"role":"system", "content":"agent"}),
++            json!({"role":"user", "content":"Fix the library screen without changing playback."})];
++        m.extend(openai_round("x", "read_file", json!({"path":"a"}), &big(8000)));
++        m.push(json!({"role":"user", "content":"continue"}));
++        let (out, report) = fit_messages(&m, 0, 100, &[]);
++        assert!(report.fits(), "{report:?}");
++        assert_eq!(out, vec![m[0].clone(), m[1].clone(), m[4].clone()]);
++        assert_eq!(report.dropped_indices, vec![2,3]);
++    }
++
++    #[test]
++    fn recovery_drops_failed_argument_examples_but_preserves_successful_calls() {
++        let mut m = vec![json!({"role":"user","content":"fix the view"})];
++        m.extend(openai_round("a", "edit", json!({"old_text":"x","new_text":"x"}), "Not run: identical"));
++        m.extend(openai_round("b", "read_file", json!({"path":"a"}), "actual file"));
++        m.extend(openai_round("c", "edit", json!({"old_text":"x","new_text":"y"}), "Error: ambiguous. Fresh evidence here"));
++        let stored = m.clone();
++        remove_failed_edit_examples(&mut m);
++        assert_eq!(m.len(), 4);
++        assert_eq!(m[1], stored[3]);
++        assert_eq!(m[2], stored[4]);
++        assert!(m[3]["content"].as_str().unwrap().contains("Fresh evidence here"));
++        assert!(!serde_json::to_string(&m).unwrap().contains("new_text"));
++    }
++
+     #[test]
+     fn under_budget_is_unchanged() {
+         let m = conversation(|i| openai_round(&format!("c{i}"), "read_file", json!({"path": "a"}), "short"), 3);
+@@ -482,7 +784,7 @@ mod tests {
+                     json!({"path": "a.swift", "old_text": big(3000), "new_text": big(3000)}),
+                     "patched",
+                 );
+-                r.extend(ollama_round("read_file", json!({"path": format!("f{i}.swift")}), &big(8000)));
++                r.extend(ollama_round("search_code", json!({"pattern": format!("f{i}")}), &big(8000)));
+                 r
+             },
+             6,
+@@ -540,6 +842,100 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn older_copies_of_a_file_go_first_and_the_latest_read_stays_whole() {
++        let mut m = conversation(|_| Vec::new(), 0);
++        m.extend(openai_round("a1", "read_file", json!({"path": "A.swift"}), &format!("A1{}", big(3000))));
++        m.extend(openai_round("b1", "read_file", json!({"path": "B.swift"}), &format!("B1{}", big(3000))));
++        m.extend(openai_round("s1", "search_code", json!({"pattern": "x"}), &big(3000)));
++        m.extend(openai_round("a2", "read_file", json!({"path": "./A.swift"}), &format!("A2{}", big(3000))));
++        for i in 0..4 {
++            m.extend(openai_round(&format!("n{i}"), "list_dir", json!({}), "small"));
++        }
++        // Superseding A1, the old reasoning and part of the search result.
++        let budget = estimate_request_tokens(&m, 0) - tokens_for_chars(3000 + 4 * 2000 + 1500);
++        let (out, report) = fit_messages(&m, 0, budget, &[1]);
++        assert!(report.fits() && report.dropped == 0, "{report:?}");
++        assert_eq!(report.superseded, 1, "{report:?}");
++        let content = |id: &str| out.iter().find(|x| x["tool_call_id"] == id).unwrap()["content"].as_str().unwrap().to_string();
++        assert!(content("a1").starts_with("[Older copy of A.swift omitted"), "{}", content("a1"));
++        assert!(content("a2").starts_with("A2") && content("a2").len() > 3000);
++        assert!(content("b1").starts_with("B1") && content("b1").len() > 3000, "the only copy of B stays whole");
++        assert!(content("s1").ends_with(TRUNCATED_MARK));
++        assert_pairs_consistent(&out);
++        assert_eq!(intact_results(&m, &out), ["a2", "b1", "n0", "n1", "n2", "n3"].map(String::from).into());
++    }
++
++    #[test]
++    fn a_read_made_stale_by_a_later_edit_is_replaced() {
++        // Recorded in Xcode: GameScene.swift read, then edited successfully;
++        // the pre-edit read stayed in the request and five later edits copied
++        // old_text from it ("old_text not found").
++        let before = "struct GameScene: View {\n    var body: some Scene {\n        WindowGroup {";
++        let mut m = conversation(|_| Vec::new(), 0);
++        m.extend(openai_round("r1", "read_file", json!({"path": "MyApp/GameScene.swift"}), before));
++        m.extend(openai_round("r2", "read_file", json!({"path": "MyApp/Other.swift"}), "struct Other {}"));
++        m.extend(openai_round("e1", "edit", json!({"path": "MyApp/GameScene.swift", "old_text": "x", "new_text": "y"}),
++            "patched MyApp/GameScene.swift (475 bytes -> 412 bytes)\n\n[Xcode diagnostics: no errors]"));
++        // A failed edit changes nothing on disk.
++        m.extend(openai_round("e2", "edit", json!({"path": "MyApp/Other.swift", "old_text": "x", "new_text": "y"}),
++            "Error: old_text not found in MyApp/Other.swift."));
++        let stored = m.clone();
++        let content = |m: &[Value], id: &str| m.iter().find(|x| x["tool_call_id"] == id).unwrap()["content"].as_str().unwrap().to_string();
++        assert_eq!(mark_stale_reads(&mut m), 1);
++        assert!(content(&m, "r1").starts_with("[Older copy of MyApp/GameScene.swift omitted - the file was changed in a later round"), "{}", content(&m, "r1"));
++        assert!(!content(&m, "r1").contains("WindowGroup"));
++        assert_eq!(content(&m, "r2"), "struct Other {}");
++        // Reading the file again after the edit gives a current copy.
++        let mut again = stored.clone();
++        again.extend(openai_round("r3", "read_file", json!({"path": "MyApp/GameScene.swift"}), "struct GameScene: View {}"));
++        assert_eq!(mark_stale_reads(&mut again), 1);
++        assert_eq!(content(&again, "r3"), "struct GameScene: View {}");
++        assert_eq!(intact_results(&stored, &m).contains("r1"), false);
++    }
++
++    #[test]
++    fn compaction_does_not_keep_a_stale_read_as_the_latest_copy() {
++        let mut m = conversation(|_| Vec::new(), 0);
++        m.extend(openai_round("a", "read_file", json!({"path": "A.swift"}), &big(3000)));
++        m.extend(openai_round("e", "edit", json!({"path": "A.swift", "old_text": "x", "new_text": "y"}), "patched A.swift (3000 bytes -> 3000 bytes)"));
++        m.extend(openai_round("b", "read_file", json!({"path": "B.swift"}), &big(3000)));
++        for i in 0..4 {
++            m.extend(openai_round(&format!("n{i}"), "list_dir", json!({}), "small"));
++        }
++        let budget = estimate_request_tokens(&m, 0) - tokens_for_chars(2000);
++        let (out, report) = fit_messages(&m, 0, budget, &[1]);
++        assert!(report.fits() && report.superseded == 1, "{report:?}");
++        let a = out.iter().find(|x| x["tool_call_id"] == "a").unwrap()["content"].as_str().unwrap();
++        assert!(a.contains("changed in a later round"), "{a}");
++        assert_eq!(out.iter().find(|x| x["tool_call_id"] == "b").unwrap()["content"].as_str().unwrap().len(), 3000);
++        assert_pairs_consistent(&out);
++    }
++
++    #[test]
++    fn rounds_holding_file_reads_are_dropped_last() {
++        let mut m = conversation(|_| Vec::new(), 0);
++        m.extend(openai_round("a", "read_file", json!({"path": "A.swift"}), &big(3000)));
++        m.extend(openai_round("l", "list_dir", json!({}), &big(3000)));
++        m.extend(openai_round("b", "read_file", json!({"path": "B.swift"}), &big(3000)));
++        for i in 0..4 {
++            m.extend(openai_round(&format!("n{i}"), "list_dir", json!({}), "small"));
++        }
++        // More than the old rounds' reasoning and the listing can give:
++        // the recent reasoning goes too, the two files stay.
++        let budget = estimate_request_tokens(&m, 0) - tokens_for_chars(3 * 2000 + 3000 + 3000);
++        let (out, report) = fit_messages(&m, 0, budget, &[1]);
++        assert!(report.fits(), "{report:?}");
++        assert!(out.iter().all(|x| x["tool_call_id"] != "l"), "the listing round is dropped");
++        for id in ["a", "b"] {
++            let r = out.iter().find(|x| x["tool_call_id"] == id).expect("file read kept");
++            assert_eq!(r["content"].as_str().unwrap().len(), 3000);
++        }
++        assert!(out.iter().any(|x| role(x) == "assistant" && x.get("reasoning").is_none()
++            && x["tool_calls"][0]["id"].as_str().is_some_and(|id| id.starts_with('n'))), "recent reasoning dropped first");
++        assert_pairs_consistent(&out);
++    }
++
+     #[test]
+     fn last_resort_shrinks_recent_rounds_but_keeps_them() {
+         // One huge recent result: nothing old to drop.
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -177,7 +177,7 @@ pub fn strip_sender_context(text: &str) -> (String, Option<String>) {
+ 
+ /// Remove every `<system-reminder>…</system-reminder>` block (an
+ /// unterminated one runs to the end of the text).
+-fn strip_system_reminders(text: &str) -> String {
++pub(crate) fn strip_system_reminders(text: &str) -> String {
+     const OPEN: &str = "<system-reminder>";
+     const CLOSE: &str = "</system-reminder>";
+     let mut out = String::new();
+@@ -259,6 +259,10 @@ pub fn extract_user_images_from_prompt(prompt: &Value) -> Vec<ImageBlock> {
+ pub enum Notification {
+     /// Reasoning text the model returned with one LLM round. Never empty.
+     Thought(String),
++    /// The bridge's own status (queue, compaction, recovery), never model
++    /// output: an ACP `notice` when the Client supports it, otherwise its
++    /// own labelled thought (see `main::handle_acp_prompt`).
++    Status(String),
+     ToolStart {
+         /// ACP v1 `toolCallId` — required for clients to pair tool_call /
+         /// tool_call_update updates. The LLM assigns this id per call; when
+@@ -369,6 +373,10 @@ pub struct AppState {
+     /// emit helpers (`acp::notify_*`) branch on it so v1 Clients see
+     /// v1 notifications and v2 Clients see v2.
+     pub protocol_version: crate::protocol::ProtocolVersion,
++    /// The Client advertised `clientCapabilities.session.notices` at
++    /// `initialize` (ACP v1), so bridge status goes out as `notice`
++    /// updates instead of thought chunks.
++    pub client_notices: bool,
+     /// The local web-search server (`[[mcp.servers]]` role `web_search`),
+     /// shared by all sessions.
+     pub web: Option<Arc<crate::websearch::WebSearch>>,
+@@ -389,6 +397,7 @@ impl Clone for AppState {
+             sessions: Arc::clone(&self.sessions),
+             config: self.config.clone(),
+             protocol_version: self.protocol_version,
++            client_notices: self.client_notices,
+             web: self.web.clone(),
+             store: self.store.clone(),
+             mcp_specs: Arc::clone(&self.mcp_specs),
+@@ -411,6 +420,7 @@ impl AppState {
+             // `initialize`. We pick V1 here so unit tests that build an
+             // AppState directly get v1 wire format without ceremony.
+             protocol_version: crate::protocol::ProtocolVersion::V1,
++            client_notices: false,
+         })
+     }
+ 
+@@ -1724,7 +1734,7 @@ async fn passthrough_call(turn: &TurnCtx, name: &str, args: &Value, cancel: &Can
+ 
+ /// Note at the end of a request when old rounds were dropped and the
+ /// notes are off.
+-const DROPPED_NOTE_PLAIN: &str = "\n\n[Note: older messages of this conversation were removed to fit the model's context window.]";
++pub(crate) const DROPPED_NOTE_PLAIN: &str = "\n\n[Note: older messages of this conversation were removed to fit the model's context window.]";
+ 
+ /// A `notes` tool call against the session's notes (at most
+ /// `notes::PER_TURN_LIMIT` per turn).
+@@ -1830,7 +1840,7 @@ async fn run_tool_call(
+     });
+ 
+     let mut raw_override: Option<Value> = None;
+-    let (outcome, note, guarded) = match turn.guard.before(name, args) {
++    let (outcome, mut note, guarded) = match turn.guard.before_call(tool_call_id, name, args) {
+         guards::Decision::Answer { text, failed } => {
+             debug!(tool = name, failed, "Tool call answered by the guard");
+             (tools::ToolOutcome { output: text, failed }, None, true)
+@@ -1853,7 +1863,7 @@ async fn run_tool_call(
+                 n if turn.passthrough.contains_key(n) => passthrough_call(turn, n, args, cancel).await,
+                 _ => tools::execute_tool_async(working_dir, name, args, cancel).await,
+             };
+-            let mut note = turn.guard.after(name, args, &outcome);
++            let mut note = turn.guard.after_call(tool_call_id, name, args, &outcome);
+             if !outcome.failed {
+                 if let Some(diag) = xcode_diagnostics(turn, name, args, cancel).await {
+                     note = Some(match note {
+@@ -1866,6 +1876,18 @@ async fn run_tool_call(
+         }
+     };
+ 
++    if outcome.failed && name == "edit" {
++        let mut recovery = tools::edit_recovery_context(working_dir, args);
++        if let Some(diag) = xcode_diagnostics(turn, name, args, cancel).await {
++            recovery.push_str(&format!("\n{diag}"));
++        }
++        note = Some(match note {
++            Some(note) => format!("{note}\n\n{recovery}"),
++            None => recovery,
++        });
++        notify(Notification::Status("Edit rejected; checking current file and diagnostics before retrying.".into()));
++    }
++
+     let mut content = if guarded {
+         vec![crate::acp::ToolCallContent::plain(&outcome.output, MAX_TOOL_OUTPUT_CHARS)]
+     } else {
+@@ -1994,6 +2016,9 @@ pub async fn session_prompt_with_cancel(
+     let mut empty_retries = 0usize;
+     let mut loop_retried = false;
+     let mut thinking_off_next = false;
++    let mut compaction_reported = false;
++    let summarized_before_turn = state.sessions_read().get(session_id).map_or(0, |s| s.summarized_upto);
++    let mut summarized_in_turn: std::collections::HashSet<usize> = std::collections::HashSet::new();
+     let mut final_text = String::new();
+     let mut last_error_class: Option<crate::llm::LlmErrorKind> = None;
+     let mut vs = VerifyState::default();
+@@ -2074,14 +2099,14 @@ pub async fn session_prompt_with_cancel(
+             crate::xcode::ConnState::Failed(why) => {
+                 if conn.report_change("failed") {
+                     warn!(reason = %why, "Xcode tools unavailable for this session");
+-                    notify(Notification::Thought(format!("(Xcode tools unavailable: {why})")));
++                    notify(Notification::Status(format!("Xcode tools unavailable: {why}")));
+                 }
+             }
+             crate::xcode::ConnState::Connecting => {
+                 if conn.report_change("connecting") {
+                     warn!("Xcode tools still connecting; this turn runs without them");
+-                    notify(Notification::Thought(
+-                        "(Xcode tools are still connecting -- Xcode may be asking \"Allow acp-bridge to access Xcode?\"; continuing without them for now)".into(),
++                    notify(Notification::Status(
++                        "Xcode tools are still connecting -- Xcode may be asking \"Allow acp-bridge to access Xcode?\"; continuing without them for now.".into(),
+                     ));
+                 }
+             }
+@@ -2101,13 +2126,37 @@ pub async fn session_prompt_with_cancel(
+     let tool_defs_chars = Value::Array(tool_defs.clone()).to_string().len();
+     let context_budget = context::budget_tokens(
+         state.config.context_size,
+-        Some(state.config.reserve_output_tokens()),
++        Some(state.config.reserve_output_tokens().max(state.config.max_tokens.unwrap_or(4096))),
+     );
+ 
+     // Tool call loop. A failed verify build starts a fresh round budget.
+     let max_rounds = max_tool_rounds();
+     let mut round = 0usize;
+-    while round < max_rounds {
++    while round <= max_rounds {
++        if round == max_rounds && !cancel.is_cancelled() {
++            // The model need not produce a final answer to trigger validation.
++            // A failed build supplies focused repair evidence, with retries
++            // bounded by the existing build-attempt limit.
++            let working_dir = state.sessions_read().get(session_id)
++                .map(|s| s.working_dir.clone()).unwrap_or_default();
++            notify(Notification::Status("Tool budget reached; checking the changes before stopping or repairing build errors.".into()));
++            let summary = format!("Stopped at the tool-call limit ({max_rounds} rounds). The model did not finish the request; earlier changes remain on disk. A passing build alone does not establish that the requested behavior is complete.");
++            match verify_after_final_answer(state, session_id, &working_dir, &summary,
++                &mut vs, turn.xcode.as_ref(), &notify, cancel).await {
++                VerifyStep::Retry => {
++                    turn.guard.on_build_failed();
++                    round = 0;
++                    empty_retries = 0;
++                    continue;
++                }
++                VerifyStep::Cancelled => { cancelled = true; break; }
++                VerifyStep::Finish(text) => final_text = text,
++                VerifyStep::Skip => final_text = append_note(&summary, "No final build was run for this checkpoint."),
++            }
++            notify(Notification::TextChunk(final_text.clone()));
++            had_error = true;
++            break;
++        }
+         if cancel.is_cancelled() {
+             cancelled = true;
+             break;
+@@ -2130,26 +2179,32 @@ pub async fn session_prompt_with_cancel(
+         // Keep the request inside the context window (the stored history
+         // is not changed). Room is kept for the notes block that is
+         // appended to the last message below.
+-        let block_room = if notes_enabled {
++        let file_state = crate::notes::file_state(&history);
++        // A file as it was before a later successful edit never reaches the
++        // model: it would copy old_text that no longer exists. Request copy
++        // only; the stored history keeps the original result.
++        let mut current = history.clone();
++        let stale_reads = context::mark_stale_reads(&mut current);
++        let block_room = file_state.len() + if notes_enabled {
+             notes_now.block(true).map_or(0, |b| b.len()) + crate::notes::BLOCK_HEADROOM_CHARS
+         } else {
+             DROPPED_NOTE_PLAIN.len()
+         };
+         let (mut messages, fit) = context::fit_messages(
+-            &history,
++            &current,
+             tool_defs_chars + block_room,
+             context_budget,
+             &[turn_user_idx],
+         );
+-        // Summarize rounds dropped for the first time (once each).
++        // Summarize rounds dropped for the first time (once each). Rounds
++        // holding the latest copy of a file are dropped last, so drops are
++        // not always oldest-first: this turn's are tracked individually.
+         let mut notes_now = notes_now;
+         if notes_enabled && fit.dropped_note() {
+-            let upto = state
+-                .sessions_read()
+-                .get(session_id)
+-                .map_or(0, |s| s.summarized_upto);
+-            let fresh: Vec<usize> = fit.dropped_indices.iter().copied().filter(|&i| i > upto).collect();
+-            if let Some(&max) = fresh.last() {
++            let fresh: Vec<usize> = fit.dropped_indices.iter().copied()
++                .filter(|&i| i > summarized_before_turn && summarized_in_turn.insert(i))
++                .collect();
++            if let Some(&max) = fresh.iter().max() {
+                 let bullet = crate::notes::summarize(
+                     &history,
+                     &fresh,
+@@ -2160,7 +2215,7 @@ pub async fn session_prompt_with_cancel(
+                     if let Some(b) = &bullet {
+                         s.notes.add_auto(b);
+                     }
+-                    s.summarized_upto = max;
++                    s.summarized_upto = s.summarized_upto.max(max);
+                     notes_now = s.notes.clone();
+                 }
+                 info!(
+@@ -2178,30 +2233,59 @@ pub async fn session_prompt_with_cancel(
+         if let Some(block) = &tail_block {
+             crate::notes::append_to_last(&mut messages, block);
+         }
++        if !file_state.is_empty() {
++            crate::notes::append_to_last(&mut messages, &file_state);
++        }
++        // What the model can still see decides how the guard answers a
++        // repeated read (a pointer only to a result that is in the request).
++        turn.guard.set_visible((fit.changed() || stale_reads > 0).then(|| context::intact_results(&history, &messages)));
+         if fit.changed() {
++            // Once per turn: with a long history every round compacts, and
++            // repeating the notice each round adds nothing.
++            if !compaction_reported {
++                compaction_reported = true;
++                notify(Notification::Status("Compacting older context; keeping the request, the latest copy of each file read, and working notes.".into()));
++            }
+             info!(
+                 before = fit.before_tokens,
+                 after = fit.after_tokens,
+                 budget = fit.budget_tokens,
++                superseded = fit.superseded,
+                 elided = fit.elided,
+                 truncated = fit.truncated,
+                 dropped = fit.dropped,
+                 "Shrank the request to fit the context window"
+             );
+         }
+-        if !fit.fits() {
++        if !fit.fits() || context::estimate_request_tokens(&messages, tool_defs_chars) > context_budget {
+             warn!(
+                 estimate = fit.after_tokens,
+                 budget = fit.budget_tokens,
+                 "Request still exceeds the context budget"
+             );
++            final_text = "The request is still too large after context compaction. Shorten the current request or attached content, then continue in this conversation. Earlier file changes remain on disk.".into();
++            notify(Notification::TextChunk(final_text.clone()));
++            had_error = true;
++            break;
+         }
+ 
++        context::remove_failed_edit_examples(&mut messages);
+         let backend = state.config.backend();
+         let options = llm::ChatOptions {
+             thinking_off: std::mem::take(&mut thinking_off_next),
+         };
+-        let chat_result = tokio::select! {
++        let chat_result = if std::env::var("LLM_QUEUE").as_deref() == Ok("1") {
++            let result = llm::queued_chat(
++                &state.config, &messages, Some(&tool_defs), options, cancel,
++                |text| notify(Notification::Status(text)),
++            ).await;
++            if cancel.is_cancelled() {
++                cancelled = true;
++                break;
++            }
++            result
++        } else {
++        let result = tokio::select! {
+             r = llm::chat_with_options(&state.config, &messages, None, Some(&tool_defs), options) => r,
+             _ = cancel.cancelled() => {
+                 info!(session_id, "Turn cancelled during the LLM request");
+@@ -2209,6 +2293,8 @@ pub async fn session_prompt_with_cancel(
+                 break;
+             }
+         };
++            result
++        };
+ 
+         match chat_result {
+             Ok(response) => {
+@@ -2242,8 +2328,8 @@ pub async fn session_prompt_with_cancel(
+                         }
+                         loop_retried = true;
+                         warn!(why = %why, reasoning_chars = reasoning.as_deref().map_or(0, str::len), "Reasoning loop; discarding the reply and retrying with thinking off");
+-                        notify(Notification::Thought(
+-                            "(stopped a repeating line of reasoning; retrying)".into(),
++                        notify(Notification::Status(
++                            "Stopped a repeating line of reasoning; retrying.".into(),
+                         ));
+                         let nudge = if why == "length" {
+                             format!("{LOOP_NUDGE}{LENGTH_NUDGE}")
+@@ -2280,17 +2366,6 @@ pub async fn session_prompt_with_cancel(
+                             "Recovered tool calls embedded in content (thinking-mode workaround)"
+                         );
+                         tool_calls = recovered;
+-                        {
+-                            let mut sessions = state.sessions_write();
+-                            if let Some(session) = sessions.get_mut(session_id) {
+-                                let assistant_msg = backend.format_assistant_message(
+-                                    &clean_text,
+-                                    &tool_calls,
+-                                    &response,
+-                                );
+-                                session.messages.push(assistant_msg);
+-                            }
+-                        }
+                     } else if clean_text.trim().is_empty()
+                         && empty_retries < MAX_EMPTY_RETRIES
+                         && round + 1 < max_rounds
+@@ -2309,7 +2384,10 @@ pub async fn session_prompt_with_cancel(
+                         continue;
+                     } else {
+                         // Final answer for this round.
+-                        let text = clean_text;
++                        let empty_answer = clean_text.trim().is_empty();
++                        let text = if empty_answer {
++                            "The model returned no usable answer after recovery attempts. The task is incomplete; earlier changes remain on disk.".to_string()
++                        } else { clean_text };
+                         if !text.is_empty() {
+                             let mut sessions = state.sessions_write();
+                             if let Some(session) = sessions.get_mut(session_id) {
+@@ -2343,7 +2421,8 @@ pub async fn session_prompt_with_cancel(
+                             VerifyStep::Skip => text,
+                             VerifyStep::Finish(text) => text,
+                         };
+-                        got_final_response = true;
++                        had_error = empty_answer;
++                        got_final_response = !empty_answer;
+                         if !text.is_empty() {
+                             final_text = text.clone();
+                             notify(Notification::TextChunk(text));
+@@ -2427,6 +2506,14 @@ pub async fn session_prompt_with_cancel(
+                     break;
+                 }
+                 round += 1;
++                if let Some(reason) = turn.guard.mutation_stop_reason() {
++                    let text = format!("\n\n**Error:** {reason}");
++                    push_message(state, session_id, json!({"role": "assistant", "content": &text}));
++                    notify(Notification::TextChunk(text.clone()));
++                    final_text = text;
++                    had_error = true;
++                    break;
++                }
+                 if let Some(text) = turn.end_turn.take() {
+                     info!("Ending the turn: {text}");
+                     push_message(state, session_id, json!({"role": "assistant", "content": &text}));
+@@ -2541,6 +2628,16 @@ pub async fn session_prompt_with_cancel(
+         "completed"
+     };
+ 
++    // A follow-up must see why the preceding turn stopped, including limits
++    // and transport failures (not only model-generated final answers).
++    if had_error && !final_text.is_empty() {
++        let already_saved = state.sessions_read().get(session_id)
++            .and_then(|s| s.messages.last())
++            .is_some_and(|m| m["role"] == "assistant" && m["content"].as_str() == Some(final_text.as_str()));
++        if !already_saved {
++            push_message(state, session_id, json!({"role":"assistant", "content":&final_text}));
++        }
++    }
+     persist_session(state, session_id, true);
+ 
+     // Estimate the current context utilization for `usage_update`. Local
+--- a/src/guards.rs
++++ b/src/guards.rs
+@@ -7,8 +7,10 @@
+ //!
+ //! - **Duplicates**: an identical read-only call (same tool, same
+ //!   canonical arguments) is answered from the cache instead of running
+-//!   again: a pointer to the earlier result while it is recent, the full
+-//!   result otherwise. Any successful change clears the cache.
++//!   again: a pointer to the earlier result while it is recent and still in
++//!   the request (see [`TurnGuard::set_visible`]), the full result
++//!   otherwise. A successful change drops what it may have changed: reads
++//!   of that file, and searches / listings / shell results.
+ //! - **Investigation streak**: read-only calls since the last successful
+ //!   change (duplicates count double). At `limit` a nudge is appended to
+ //!   the tool result, at `limit + 4` a user message follows the round, from
+@@ -36,6 +38,13 @@ const MAX_BLOCKED: u32 = 3;
+ const RECENT_ROUNDS: usize = 4;
+ /// Characters of the earlier result repeated with a pointer.
+ const POINTER_PREVIEW_CHARS: usize = 300;
++/// Start of a duplicate answer that points to an earlier result instead of
++/// repeating it (compaction must not treat it as a copy of the file).
++pub const DUPLICATE_POINTER_MARK: &str = "[Duplicate: ";
++/// Start of a duplicate answer that repeats the earlier result in full.
++pub const DUPLICATE_FULL_MARK: &str = "[Duplicate of your call in round ";
++/// Start of a hint or nudge the guard appends to a tool result.
++pub const HINT_MARK: &str = "[acp-bridge] ";
+ 
+ /// What the engine does with a tool call.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -80,6 +89,11 @@ struct Cached {
+     output: String,
+     failed: bool,
+     count: u32,
++    /// The tool call whose result holds `output` (the latest full copy).
++    call_id: String,
++    tool: String,
++    /// Canonical path of a `read_file`.
++    path: Option<String>,
+ }
+ 
+ /// Per-turn guard state.
+@@ -99,6 +113,9 @@ pub struct TurnGuard {
+     pending_user_nudge: Option<String>,
+     blocked: u32,
+     cache: HashMap<String, Cached>,
++    /// Tool-call ids whose results the last request still held; `None` =
++    /// nothing was compacted away.
++    visible: Option<HashSet<String>>,
+     hinted: HashSet<String>,
+     /// Successful writes: path -> (round, content).
+     writes: HashMap<String, (usize, String)>,
+@@ -106,6 +123,9 @@ pub struct TurnGuard {
+     edits: HashMap<String, usize>,
+     /// Short notes on what read-only calls found (for the final summary).
+     findings: Vec<String>,
++    failed_mutations: HashMap<String, u32>,
++    stalled_mutations: u32,
++    mutation_error: Option<String>,
+ }
+ 
+ impl TurnGuard {
+@@ -125,10 +145,14 @@ impl TurnGuard {
+             pending_user_nudge: None,
+             blocked: 0,
+             cache: HashMap::new(),
++            visible: None,
+             hinted: HashSet::new(),
+             writes: HashMap::new(),
+             edits: HashMap::new(),
+             findings: Vec::new(),
++            failed_mutations: HashMap::new(),
++            stalled_mutations: 0,
++            mutation_error: None,
+         }
+     }
+ 
+@@ -151,6 +175,17 @@ impl TurnGuard {
+         self.round
+     }
+ 
++    /// Which tool results the request just sent still held (`None`: the
++    /// whole history). A repeated call whose earlier result was compacted
++    /// away gets that result again instead of a pointer to it.
++    pub fn set_visible(&mut self, ids: Option<HashSet<String>>) {
++        self.visible = ids;
++    }
++
++    fn is_visible(&self, c: &Cached) -> bool {
++        c.round == self.round || self.visible.as_ref().map_or(true, |ids| ids.contains(&c.call_id))
++    }
++
+     /// Current investigation streak.
+     pub fn streak(&self) -> u32 {
+         self.streak
+@@ -161,6 +196,22 @@ impl TurnGuard {
+         self.enabled() && self.blocked >= MAX_BLOCKED
+     }
+ 
++    /// Stop repeated failures independently of the read-only investigation limit.
++    pub fn mutation_stop_reason(&self) -> Option<&str> {
++        self.mutation_error.as_deref()
++    }
++
++    fn failed_mutation(&mut self, name: &str, args: &Value, reason: &str) {
++        let count = self.failed_mutations.entry(call_key(&self.wd, name, args)).or_default();
++        *count += 1;
++        self.stalled_mutations += 1;
++        if *count >= 3 || self.stalled_mutations >= 6 {
++            self.mutation_error = Some(format!(
++                "Stopped because file edits repeatedly failed or made no change. Last result: {}. Earlier changes remain on disk; the task is incomplete and has not passed a final build.",
++                reason.chars().take(500).collect::<String>()));
++        }
++    }
++
+     /// A user message to add after this round, once.
+     pub fn take_user_nudge(&mut self) -> Option<String> {
+         self.pending_user_nudge.take()
+@@ -187,9 +238,23 @@ impl TurnGuard {
+             .join("\n")
+     }
+ 
+-    /// Decide whether a call runs. `name` / `args` are the canonical tool
+-    /// name and (normalized) arguments.
++    /// [`Self::before_call`] without a tool-call id.
+     pub fn before(&mut self, name: &str, args: &Value) -> Decision {
++        self.before_call("", name, args)
++    }
++
++    /// Decide whether a call runs. `name` / `args` are the canonical tool
++    /// name and (normalized) arguments; `call_id` the call's id.
++    pub fn before_call(&mut self, call_id: &str, name: &str, args: &Value) -> Decision {
++        if let Some(text) = placeholder_refusal(name, args) {
++            self.failed_mutation(name, args, &text);
++            return Decision::Answer { text, failed: true };
++        }
++        if name == "edit" && str_arg(args, "old_text") == str_arg(args, "new_text") {
++            let text = "Not run: old_text and new_text are identical. Read the affected file and supply a real change, or explain why you cannot continue.";
++            self.failed_mutation(name, args, text);
++            return Decision::Answer { text: text.into(), failed: true };
++        }
+         if !self.enabled() {
+             return Decision::Run;
+         }
+@@ -204,6 +269,7 @@ impl TurnGuard {
+                         let text = format!(
+                             "File already has exactly this content (written in round {round}); no change made."
+                         );
++                        self.failed_mutation(name, args, &text);
+                         let suffix = self.bump(1);
+                         return Decision::Answer {
+                             text: join(&text, suffix.as_deref()),
+@@ -224,6 +290,7 @@ impl TurnGuard {
+                         let text = format!(
+                             "This edit was already applied in round {round}; the file already contains new_text."
+                         );
++                        self.failed_mutation(name, args, &text);
+                         let suffix = self.bump(1);
+                         return Decision::Answer {
+                             text: join(&text, suffix.as_deref()),
+@@ -253,12 +320,20 @@ impl TurnGuard {
+                 }
+                 if kind == Kind::Cacheable {
+                     let key = call_key(&self.wd, name, args);
+-                    if let Some(c) = self.cache.get_mut(&key) {
++                    if let Some(mut c) = self.cache.get(&key).cloned() {
+                         c.count += 1;
+-                        let c = c.clone();
+-                        let text = duplicate_text(&c, self.round);
+-                        info!(tool = name, count = c.count, original_round = c.round, "Duplicate tool call answered from cache");
+-                        let suffix = self.bump(2);
++                        let visible = self.is_visible(&c);
++                        let text = duplicate_text(&c, self.round, visible);
++                        info!(tool = name, count = c.count, original_round = c.round, visible, "Duplicate tool call answered from cache");
++                        if !visible {
++                            // This answer is now the copy the model can see.
++                            c.call_id = call_id.to_string();
++                            c.round = self.round;
++                        }
++                        self.cache.insert(key, c.clone());
++                        // A true repeat counts double; asking again for a
++                        // result compaction removed is an ordinary read.
++                        let suffix = self.bump(if visible { 2 } else { 1 });
+                         return Decision::Answer {
+                             text: join(&text, suffix.as_deref()),
+                             failed: c.failed,
+@@ -271,16 +346,37 @@ impl TurnGuard {
+         }
+     }
+ 
++    /// [`Self::after_call`] without a tool-call id.
++    pub fn after(&mut self, name: &str, args: &Value, outcome: &ToolOutcome) -> Option<String> {
++        self.after_call("", name, args, outcome)
++    }
++
+     /// Bookkeeping after a call ran. Returns text to append to the tool
+     /// result (hint and / or nudge).
+-    pub fn after(&mut self, name: &str, args: &Value, outcome: &ToolOutcome) -> Option<String> {
++    pub fn after_call(&mut self, call_id: &str, name: &str, args: &Value, outcome: &ToolOutcome) -> Option<String> {
++        if name == "edit" && outcome.failed {
++            self.failed_mutation(name, args, &outcome.output);
++            // The engine appends the current file to a failed edit, so
++            // reading it again only costs a round.
++            return Some("Do not repeat this failed call. Copy old_text exactly from the current file shown below (no placeholders such as \"// ...\"), or report the blocker.".into());
++        }
++        if name == "write_file" && outcome.failed {
++            self.failed_mutation(name, args, &outcome.output);
++            return Some("Do not repeat this failed call. Read the current file and change the arguments, or report the blocker.".into());
++        }
++        if matches!(name, "edit" | "write_file") && !outcome.failed {
++            self.failed_mutations.clear();
++            self.stalled_mutations = 0;
++            self.mutation_error = None;
++        }
+         if !self.enabled() {
+             return None;
+         }
+         match classify(name, args) {
+             Kind::Mutating => {
+                 if !outcome.failed {
+-                    self.on_change();
++                    let path = matches!(name, "write_file" | "edit").then(|| canonical_path(&self.wd, args));
++                    self.on_change_of(path.as_deref());
+                     match name {
+                         "write_file" => {
+                             self.writes.insert(
+@@ -306,6 +402,9 @@ impl TurnGuard {
+                             output: outcome.output.clone(),
+                             failed: outcome.failed,
+                             count: 1,
++                            call_id: call_id.to_string(),
++                            tool: name.to_string(),
++                            path: (name == "read_file").then(|| canonical_path(&self.wd, args)),
+                         },
+                     );
+                 }
+@@ -329,11 +428,23 @@ impl TurnGuard {
+     /// A successful change (also a passing verify build): the streak and
+     /// the thresholds restart, cached results are stale.
+     pub fn on_change(&mut self) {
++        self.on_change_of(None);
++    }
++
++    /// A successful change to `path` (`None`: any file may have changed).
++    /// Only results it can affect leave the cache: reads of that file, and
++    /// searches, listings and shell / git output. Reads of other files stay
++    /// cached, so reading them again is still recognised as a repeat.
++    fn on_change_of(&mut self, path: Option<&str>) {
+         self.streak = 0;
+         self.nudged = false;
+         self.user_nudged = false;
+         self.blocked = 0;
+-        self.cache.clear();
++        self.cache.retain(|_, c| match (c.tool.as_str(), path) {
++            ("docs_search" | "web_search", _) => true,
++            ("read_file", Some(changed)) => c.path.as_deref() != Some(changed),
++            _ => false,
++        });
+     }
+ 
+     /// Add `delta` to the streak; returns the nudge text when the first
+@@ -359,7 +470,7 @@ impl TurnGuard {
+                 ""
+             };
+             return Some(format!(
+-                "[acp-bridge] {} read/search calls without changing anything. Stop investigating. If the task needs a code change, make the most likely fix now with edit{verify}. If it is a question, answer it now.",
++                "{HINT_MARK}{} read/search calls without changing anything. Stop investigating. If the task needs a code change, make the most likely fix now with edit{verify}. If it is a question, answer it now.",
+                 self.streak
+             ));
+         }
+@@ -422,7 +533,7 @@ impl TurnGuard {
+             };
+             info!(symbol = %symbol, "SDK-symbol hint");
+             Some(format!(
+-                "[acp-bridge] {symbol} is not declared in this project -- {what}, so searching the project will not show its API. {}",
++                "{HINT_MARK}{symbol} is not declared in this project -- {what}, so searching the project will not show its API. {}",
+                 self.lookup_advice(&symbol, &query)
+             ))
+         } else {
+@@ -447,7 +558,7 @@ impl TurnGuard {
+             let subject = owner.clone().unwrap_or_else(|| "that type".to_string());
+             info!(member = %symbol, owner = ?owner, "SDK-member hint");
+             Some(format!(
+-                "[acp-bridge] '{symbol}' from the compiler error is not declared in this project -- it is a member of an Apple SDK type{of}, so searching the project will not show its API. {}",
++                "{HINT_MARK}'{symbol}' from the compiler error is not declared in this project -- it is a member of an Apple SDK type{of}, so searching the project will not show its API. {}",
+                 self.lookup_advice(&subject, &query)
+             ))
+         }
+@@ -486,7 +597,33 @@ fn edit_key(args: &Value) -> String {
+     )
+ }
+ 
+-fn duplicate_text(c: &Cached, round: usize) -> String {
++/// The refusal for a `write_file` / `edit` whose new text contains one of
++/// the bridge's own markers: the model copied a placeholder for content it
++/// can no longer see (recorded: a whole ContentView.swift replaced by an
++/// elision marker). The file is not touched.
++fn placeholder_refusal(name: &str, args: &Value) -> Option<String> {
++    let field = match name {
++        "write_file" => "content",
++        "edit" => "new_text",
++        _ => return None,
++    };
++    let text = str_arg(args, field);
++    let marker = crate::context::harness_markers()
++        .into_iter()
++        .map(str::trim)
++        .find(|m| text.contains(m))?;
++    Some(format!(
++        "Not run: {field} contains \"{marker}\", which the bridge put in your view in place of content you can no longer see; it is not file text. Call read_file {} for the current version, then write the real text.",
++        str_arg(args, "path")
++    ))
++}
++
++/// The canonical form of a call's `path` argument (as in [`call_key`]).
++fn canonical_path(wd: &Path, args: &Value) -> String {
++    crate::tools::display_path(wd, str_arg(args, "path").trim()).to_string_lossy().into_owned()
++}
++
++fn duplicate_text(c: &Cached, round: usize, visible: bool) -> String {
+     let preview = |s: &str| -> String {
+         let cut: String = s.chars().take(POINTER_PREVIEW_CHARS).collect();
+         if cut.len() < s.len() {
+@@ -495,9 +632,17 @@ fn duplicate_text(c: &Cached, round: usize) -> String {
+             cut
+         }
+     };
++    if !visible {
++        // Compaction removed the earlier result; a pointer would point at
++        // nothing.
++        return format!(
++            "{DUPLICATE_FULL_MARK}{}; nothing changed since, but that result is no longer in the conversation. Same result again:]\n{}",
++            c.round, c.output
++        );
++    }
+     if c.count >= 3 {
+         return format!(
+-            "[Duplicate: you have now made this exact call {} times; nothing changed since round {}. Stop repeating it: use the result or make the change.]\n{}",
++            "{DUPLICATE_POINTER_MARK}you have now made this exact call {} times; nothing changed since round {}. Stop repeating it: use the result or make the change.]\n{}",
+             c.count,
+             c.round,
+             preview(&c.output)
+@@ -505,13 +650,13 @@ fn duplicate_text(c: &Cached, round: usize) -> String {
+     }
+     if round.saturating_sub(c.round) <= RECENT_ROUNDS {
+         format!(
+-            "[Duplicate: identical to your call in round {}; nothing changed since. The result is above. Don't repeat calls -- use it or make the change.]\n{}",
++            "{DUPLICATE_POINTER_MARK}identical to your call in round {}; nothing changed since. The result is above. Don't repeat calls -- use it or make the change.]\n{}",
+             c.round,
+             preview(&c.output)
+         )
+     } else {
+         format!(
+-            "[Duplicate of your call in round {}; nothing changed since. Same result again:]\n{}",
++            "{DUPLICATE_FULL_MARK}{}; nothing changed since. Same result again:]\n{}",
+             c.round, c.output
+         )
+     }
+@@ -964,6 +1109,48 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn identical_edit_stops_after_three_attempts_even_with_reads() {
++        let wd = tmp("noop-loop");
++        let mut g = TurnGuard::new(cfg(6), &wd, "", vec![]);
++        let args = json!({"path":"a.swift", "old_text":"some Scene", "new_text":"some Scene"});
++        for i in 0..3 {
++            assert!(matches!(g.before("edit", &args), Decision::Answer { failed: true, .. }));
++            g.after("read_file", &json!({"path":"a.swift"}), &ok("some Scene"));
++            assert_eq!(g.mutation_stop_reason().is_some(), i == 2);
++        }
++        assert!(g.mutation_stop_reason().unwrap().contains("identical"));
++        let _ = std::fs::remove_dir_all(wd);
++    }
++
++    #[test]
++    fn failed_edits_stop_and_real_changes_reset_the_counter() {
++        let wd = tmp("failed-loop");
++        let mut g = TurnGuard::new(cfg(6), &wd, "", vec![]);
++        let args = json!({"path":"a.swift", "old_text":"a", "new_text":"b"});
++        let failed = ToolOutcome { output: "Error: old_text appears 2 times".into(), failed: true };
++        for _ in 0..2 { g.after("edit", &args, &failed); }
++        assert!(g.mutation_stop_reason().is_none());
++        g.after("edit", &args, &ok("patched"));
++        for _ in 0..2 { g.after("edit", &args, &failed); }
++        assert!(g.mutation_stop_reason().is_none());
++        g.after("edit", &args, &failed);
++        assert!(g.mutation_stop_reason().unwrap().contains("appears 2 times"));
++        let _ = std::fs::remove_dir_all(wd);
++    }
++
++    #[test]
++    fn alternating_failed_edits_cannot_evade_the_limit() {
++        let wd = tmp("alternating-loop");
++        let mut g = TurnGuard::new(cfg(6), &wd, "", vec![]);
++        let failed = ToolOutcome { output: "Error: not found".into(), failed: true };
++        for i in 0..6 {
++            g.after("edit", &json!({"path":"a.swift", "old_text":format!("a{i}"), "new_text":"b"}), &failed);
++            assert_eq!(g.mutation_stop_reason().is_some(), i == 5);
++        }
++        let _ = std::fs::remove_dir_all(wd);
++    }
++
+     #[test]
+     fn duplicates_are_answered_from_cache_until_something_changes() {
+         let wd = tmp("dup");
+@@ -1214,4 +1401,82 @@ mod tests {
+         assert!(s.contains("- search \"nope\": no matches"), "{s}");
+         let _ = std::fs::remove_dir_all(&wd);
+     }
++
++    #[test]
++    fn an_edit_keeps_reads_of_other_files_cached() {
++        // Recorded in Xcode: after editing one file the model re-read six
++        // unchanged files; each looked new because any edit cleared the cache.
++        let wd = tmp("per-file");
++        let mut g = TurnGuard::new(cfg(6), &wd, "", vec![]);
++        let a = json!({"path": "MyApp/A.swift"});
++        let b = json!({"path": "MyApp/B.swift"});
++        read(&mut g, "read_file", a.clone(), "struct A {}");
++        read(&mut g, "read_file", b.clone(), "struct B {}");
++        g.begin_round();
++        let edit = json!({"path": "MyApp/A.swift", "old_text": "A {}", "new_text": "A { var x = 1 }"});
++        assert_eq!(g.before("edit", &edit), Decision::Run);
++        g.after("edit", &edit, &ok("patched"));
++        let (dup, _) = read(&mut g, "read_file", b.clone(), "");
++        assert!(dup.expect("unchanged file is a repeat").contains("struct B {}"));
++        let (again, _) = read(&mut g, "read_file", a, "struct A { var x = 1 }");
++        assert!(again.is_none(), "the edited file is read again");
++        let _ = std::fs::remove_dir_all(&wd);
++    }
++
++    #[test]
++    fn writing_a_harness_placeholder_is_refused() {
++        // Recorded in Xcode: write_file replaced ContentView.swift with the
++        // elision marker it saw in an old write_file argument.
++        let wd = tmp("placeholder");
++        let mut g = TurnGuard::new(cfg(6), &wd, "", vec![]);
++        let copied = "[contents of MyApp/ContentView.swift elided - call read_file for the current version]";
++        let w = json!({"path": "MyApp/ContentView.swift", "content": copied});
++        let Decision::Answer { text, failed } = g.before("write_file", &w) else { panic!("refused") };
++        assert!(failed && text.starts_with("Not run: content contains") && text.contains("read_file MyApp/ContentView.swift"), "{text}");
++        // Every marker the bridge inserts is caught, in write_file content
++        // and in edit new_text, also with the guard's limits off.
++        let mut off = TurnGuard::new(cfg(0), &wd, "", vec![]);
++        for marker in crate::context::harness_markers() {
++            let body = format!("struct A {{}}\n{marker} 120\n");
++            let e = json!({"path": "A.swift", "old_text": "struct A {}", "new_text": body});
++            assert!(matches!(off.before("edit", &e), Decision::Answer { failed: true, .. }), "{marker}");
++            let w = json!({"path": "A.swift", "content": body});
++            assert!(matches!(g.before("write_file", &w), Decision::Answer { failed: true, .. }), "{marker}");
++        }
++        // Real content passes; an old_text never matches a marker anyway.
++        assert_eq!(g.before("write_file", &json!({"path": "A.swift", "content": "struct A { let s = \"[x]\" }\n"})), Decision::Run);
++        assert_eq!(g.before("edit", &json!({"path": "A.swift", "old_text": "a", "new_text": "b"})), Decision::Run);
++        // Refusals count toward the repeated-failure stop.
++        let mut h = TurnGuard::new(cfg(6), &wd, "", vec![]);
++        for _ in 0..3 {
++            h.before("write_file", &w);
++        }
++        assert!(h.mutation_stop_reason().is_some());
++        let _ = std::fs::remove_dir_all(&wd);
++    }
++
++    #[test]
++    fn a_repeat_of_a_compacted_result_gets_it_in_full() {
++        let wd = tmp("visible");
++        let mut g = TurnGuard::new(cfg(6), &wd, "", vec![]);
++        let a = json!({"path": "A.swift"});
++        g.begin_round();
++        assert_eq!(g.before_call("c1", "read_file", &a), Decision::Run);
++        g.after_call("c1", "read_file", &a, &ok("let full = 1"));
++        // The next request no longer holds c1's result.
++        g.begin_round();
++        g.set_visible(Some(HashSet::new()));
++        let Decision::Answer { text, .. } = g.before_call("c2", "read_file", &a) else { panic!("cached") };
++        assert!(text.starts_with("[Duplicate of your call in round 1") && text.contains("no longer in the conversation"), "{text}");
++        assert!(text.contains("let full = 1"));
++        assert!(!text.starts_with(DUPLICATE_POINTER_MARK));
++        assert_eq!(g.streak(), 2, "an ordinary read, not a double-counted repeat");
++        // c2's copy is in the request: now it is a real repeat.
++        g.begin_round();
++        g.set_visible(Some(HashSet::from(["c2".to_string()])));
++        let Decision::Answer { text, .. } = g.before_call("c3", "read_file", &a) else { panic!("cached") };
++        assert!(text.starts_with(DUPLICATE_POINTER_MARK), "{text}");
++        assert_eq!(g.streak(), 4);
++        let _ = std::fs::remove_dir_all(&wd);
++    }
+ }
+--- a/src/llm.rs
++++ b/src/llm.rs
+@@ -1066,6 +1066,98 @@ pub async fn chat_with_options(
+     })
+ }
+ 
++/// Queue-aware transport. Status is reported separately from model messages.
++/// A stable key makes submission retries safe; polling reconnects to the same job.
++pub async fn queued_chat(
++    config: &LlmConfig,
++    messages: &[Value],
++    tools: Option<&[Value]>,
++    options: ChatOptions,
++    cancel: &crate::process::CancelToken,
++    status: impl Fn(String),
++) -> Result<Value, LlmError> {
++    let fail = |message: String| LlmError {
++        kind: LlmErrorKind::Unknown, message, status: None,
++    };
++    let base = format!("{}/jobs", config.base_url.trim_end_matches('/'));
++    let mut body = build_body(config, messages, &config.model, false, tools);
++    if options.thinking_off {
++        body["reasoning_effort"] = json!("none");
++    }
++    let key = uuid::Uuid::new_v4().to_string();
++    let deadline = tokio::time::Instant::now() + Duration::from_secs(config.timeout_secs);
++    let mut id: Option<String> = None;
++    let mut previous = String::new();
++    let mut failures = 0;
++    let work = async {
++        loop {
++            let request = if let Some(ref jid) = id {
++                config.client.get(format!("{base}/{jid}")).bearer_auth(&config.api_key)
++            } else {
++                config.authenticated_post(&base).header("Idempotency-Key", &key).json(&body)
++            };
++            let response = request.timeout(Duration::from_secs(10)).send().await;
++            let value = match response {
++                Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
++                Ok(r) if r.status().is_server_error() => None,
++                Ok(r) => return Err(fail(format!("Queue rejected request (HTTP {}); retry later", r.status()))),
++                Err(_) => None,
++            };
++            if let Some(value) = value {
++                failures = 0;
++                // The submission itself answers "queued" even when the job
++                // starts at once; only a poll that still says so is a wait.
++                let polled = id.is_some();
++                if id.is_none() {
++                    id = value["id"].as_str().map(str::to_string);
++                    if id.is_none() { return Err(fail("Queue returned no request ID".into())); }
++                }
++                match value["state"].as_str().unwrap_or("") {
++                    "completed" => return Ok(value["result"].clone()),
++                    "failed" | "cancelled" | "expired" => {
++                        return Err(fail(value["error"].as_str().unwrap_or("Request ended").into()));
++                    }
++                    "queued" | "running" => {
++                        // State changes only: a wait (and its position), then
++                        // the start after a reported wait. Running without a
++                        // wait is the normal case and not reported.
++                        let text = if value["state"] == "queued" {
++                            polled.then(|| format!("Waiting for the inference server — queue position {} (may change as other users arrive).", value["position"]))
++                        } else {
++                            (!previous.is_empty()).then(|| "Running on the inference server.".to_string())
++                        };
++                        if let Some(text) = text.filter(|t| *t != previous) {
++                            status(text.clone());
++                            previous = text;
++                        }
++                    }
++                    _ => return Err(fail("Invalid queue status".into())),
++                }
++            } else {
++                failures += 1;
++                if failures >= 5 { return Err(fail("Queue connection lost; request may still be running until its deadline.".into())); }
++                if failures == 1 {
++                    previous = "Reconnecting to the same queued request…".to_string();
++                    status(previous.clone());
++                }
++            }
++            tokio::time::sleep(Duration::from_secs(1)).await;
++        }
++    };
++    let result = tokio::select! {
++        result = work => result,
++        _ = cancel.cancelled() => Err(fail("Request cancelled".into())),
++        _ = tokio::time::sleep_until(deadline) => Err(fail("Queue request deadline reached".into())),
++    };
++    if result.is_err() {
++        if let Some(jid) = id {
++            let _ = config.client.delete(format!("{base}/{jid}"))
++                .bearer_auth(&config.api_key).timeout(Duration::from_secs(5)).send().await;
++        }
++    }
++    result
++}
++
+ /// Stream chat completion — auto-detects backend and uses appropriate parser.
+ pub async fn stream_chat(
+     config: &LlmConfig,
+@@ -1312,6 +1404,101 @@ mod tests {
+         format!("http://{addr}")
+     }
+ 
++    #[tokio::test]
++    async fn queue_status_and_reconnect_preserve_request() {
++        use axum::extract::State;
++        use std::sync::Mutex;
++        let keys = Arc::new(Mutex::new(Vec::<String>::new()));
++        async fn submit(State(keys): State<Arc<Mutex<Vec<String>>>>, headers: axum::http::HeaderMap) -> Response {
++            let mut keys = keys.lock().unwrap();
++            keys.push(headers["idempotency-key"].to_str().unwrap().to_string());
++            if keys.len() == 1 {
++                axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
++            } else {
++                Json(json!({"id":"job1", "state":"queued", "position":2})).into_response()
++            }
++        }
++        let polls = Arc::new(AtomicUsize::new(0));
++        let router = Router::new()
++            .route("/v1/jobs", post(submit))
++            .with_state(keys.clone())
++            .merge(Router::new().route("/v1/jobs/job1", axum::routing::get(
++                |State(polls): State<Arc<AtomicUsize>>| async move {
++                    match polls.fetch_add(1, Ordering::SeqCst) {
++                        0 => Json(json!({"id":"job1", "state":"queued", "position":1})),
++                        1 => Json(json!({"id":"job1", "state":"running"})),
++                        _ => Json(json!({"id":"job1", "state":"completed", "result":{"choices":[{"message":{"content":"answer", "tool_calls":[{"id":"tool1"}]}}]}})),
++                    }
++                })).with_state(polls));
++        let url = serve(router).await;
++        let cfg = test_config(&format!("{url}/v1"));
++        let status = std::cell::RefCell::new(Vec::new());
++        let cancel = crate::process::CancelToken::new();
++        let result = queued_chat(&cfg, &[], None, ChatOptions::default(), &cancel,
++            |s| status.borrow_mut().push(s)).await.unwrap();
++        let keys = keys.lock().unwrap();
++        assert_eq!(keys.len(), 2);
++        assert_eq!(keys[0], keys[1]);
++        // One line per state change: the outage, the wait, the start.
++        assert_eq!(status.borrow().len(), 3, "{:?}", status.borrow());
++        assert!(status.borrow()[0].starts_with("Reconnecting"));
++        assert!(status.borrow()[1].contains("queue position 1"));
++        assert_eq!(status.borrow()[2], "Running on the inference server.");
++        assert_eq!(result["choices"][0]["message"]["content"], "answer");
++        assert_eq!(result["choices"][0]["message"]["tool_calls"][0]["id"], "tool1");
++    }
++
++    #[tokio::test]
++    async fn queue_reports_nothing_when_the_job_starts_at_once() {
++        // The single-user case: the submission says "queued, position 1"
++        // and the first poll already says "running".
++        let router = Router::new()
++            .route("/v1/jobs", post(|| async { Json(json!({"id":"job1", "state":"queued", "position":1})) }))
++            .route("/v1/jobs/job1", axum::routing::get({
++                let polls = Arc::new(AtomicUsize::new(0));
++                move || {
++                    let n = polls.fetch_add(1, Ordering::SeqCst);
++                    async move {
++                        if n == 0 {
++                            Json(json!({"id":"job1", "state":"running"}))
++                        } else {
++                            Json(json!({"id":"job1", "state":"completed", "result":{"choices":[{"message":{"content":"ok"}}]}}))
++                        }
++                    }
++                }
++            }));
++        let url = serve(router).await;
++        let cfg = test_config(&format!("{url}/v1"));
++        let status = std::cell::RefCell::new(Vec::<String>::new());
++        let cancel = crate::process::CancelToken::new();
++        let result = queued_chat(&cfg, &[], None, ChatOptions::default(), &cancel,
++            |s| status.borrow_mut().push(s)).await.unwrap();
++        assert_eq!(result["choices"][0]["message"]["content"], "ok");
++        assert!(status.borrow().is_empty(), "{:?}", status.borrow());
++    }
++
++    #[tokio::test]
++    async fn queue_cancel_sends_delete() {
++        use axum::extract::State;
++        let deleted = Arc::new(AtomicUsize::new(0));
++        async fn delete(State(count): State<Arc<AtomicUsize>>) -> Json<Value> {
++            count.fetch_add(1, Ordering::SeqCst);
++            Json(json!({"state":"cancelled"}))
++        }
++        let router = Router::new()
++            .route("/v1/jobs", post(|| async { Json(json!({"id":"job1", "state":"queued", "position":1})) }))
++            .route("/v1/jobs/job1", axum::routing::delete(delete)
++                .get(|| async { Json(json!({"id":"job1", "state":"queued", "position":1})) }))
++            .with_state(deleted.clone());
++        let url = serve(router).await;
++        let cfg = test_config(&format!("{url}/v1"));
++        let cancel = crate::process::CancelToken::new();
++        let result = queued_chat(&cfg, &[], None, ChatOptions::default(), &cancel,
++            |_| cancel.cancel()).await;
++        assert!(result.is_err());
++        assert_eq!(deleted.load(Ordering::SeqCst), 1);
++    }
++
+     // -- pure helpers -------------------------------------------------------
+ 
+     #[test]
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -469,6 +469,12 @@ async fn run_acp_loop(mut state: Arc<AppState>) -> bool {
+                                 // run_acp_loop the Arc has refcount 1, so
+                                 // make_mut never actually clones.
+                                 Arc::make_mut(&mut state).protocol_version = negotiated;
++                                // ACP v1 notices are opt-in per Client:
++                                // `session.notices: {}` (null or absent = no).
++                                let notices = negotiated == ProtocolVersion::V1
++                                    && params["clientCapabilities"]["session"]["notices"].is_object();
++                                Arc::make_mut(&mut state).client_notices = notices;
++                                info!(notices, "Client session capabilities");
+                                 let result = engine::initialize(&state.config, negotiated);
+                                 acp::send_response(&id, result);
+                             }
+@@ -855,8 +861,33 @@ async fn handle_acp_prompt(
+     // the engine ends without finishing them).
+     let mut open_tool_calls: Vec<String> = Vec::new();
+     while let Some(notif) = notify_rx.recv().await {
+-        let is_thought = matches!(notif, Notification::Thought(_));
++        let is_thought = match &notif {
++            Notification::Thought(_) => true,
++            Notification::Status(_) => !state.client_notices,
++            _ => false,
++        };
+         match notif {
++            Notification::Status(text) if state.client_notices => {
++                acp::notify_notice(&session_id, "info", &text);
++            }
++            Notification::Status(text) => {
++                // Without notices it is a thought of its own, labelled so it
++                // is not read as the model's reasoning. Xcode joins
++                // back-to-back thoughts into one block; the blank line keeps
++                // the label on its own paragraph.
++                thought_seq += 1;
++                let text = if prev_was_thought {
++                    format!("\n\n[acp-bridge] {text}")
++                } else {
++                    format!("[acp-bridge] {text}")
++                };
++                acp::notify_thought_for(
++                    state.protocol_version,
++                    &session_id,
++                    &text,
++                    &format!("{message_id}-thought-{thought_seq}"),
++                )
++            }
+             Notification::Thought(text) => {
+                 // One thought message per LLM round (v2 requires messageId).
+                 // Clients that ignore messageId (Xcode) append consecutive
+--- a/src/notes.rs
++++ b/src/notes.rs
+@@ -33,6 +33,10 @@ const BLOCK_AUTO_CHARS: usize = 600;
+ const BULLET_MAX: usize = 600;
+ /// Line in the block when rounds were dropped.
+ pub const DROPPED_LINE: &str = "Older rounds were removed to fit the context window; their summary is under \"Dropped context\".";
++/// Opening tag of the notes block appended to each request.
++pub const NOTES_TAG: &str = "<working-notes>";
++/// Opening tag of the file-state block appended to each request.
++pub const FILE_STATE_TAG: &str = "<file-state>";
+ /// Headroom (characters) the engine reserves for the block in the context
+ /// budget on top of its current size.
+ pub const BLOCK_HEADROOM_CHARS: usize = 800;
+@@ -57,6 +61,38 @@ fn cut(text: &str, max: usize) -> String {
+     s
+ }
+ 
++/// Reconstructed from persisted tool evidence, not model-written notes. Keep
++/// the latest mutation result per file even when raw exchanges are compacted.
++pub fn file_state(messages: &[Value]) -> String {
++    let mut entries: Vec<(String, String)> = Vec::new();
++    for (i, message) in messages.iter().enumerate() {
++        let Some(calls) = message["tool_calls"].as_array() else { continue; };
++        for call in calls {
++            let name = call["function"]["name"].as_str().unwrap_or("");
++            if !matches!(name, "edit" | "write_file") { continue; }
++            let raw = &call["function"]["arguments"];
++            let args = raw.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok())
++                .unwrap_or_else(|| raw.clone());
++            let Some(path) = args["path"].as_str() else { continue; };
++            let result = messages[i + 1..].iter().take_while(|m| m["role"] == "tool")
++                .find(|m| call.get("id").map_or(calls.len() == 1, |id| m.get("tool_call_id") == Some(id)));
++            let Some(text) = result.and_then(|m| m["content"].as_str()) else { continue; };
++            let failed = text.starts_with("Error") || text.starts_with("Not run");
++            let diagnostic = text.find("[Xcode diagnostics").map(|i| &text[i..]);
++            let detail = if failed { text.lines().next().unwrap_or(text) } else {
++                diagnostic.unwrap_or("Changed on disk; a full build is still required.")
++            };
++            let entry = format!("{}: {} — {}", cut(path, 160), if failed { "last edit FAILED" } else { "changed" }, cut(detail, 360));
++            entries.retain(|(p, _)| p != path);
++            entries.push((path.into(), entry));
++            if entries.len() > 8 { entries.remove(0); }
++        }
++    }
++    if entries.is_empty() { return String::new(); }
++    format!("\n{FILE_STATE_TAG}\nLatest file evidence (not a claim that the task is complete):\n{}\nUse the current file before editing; do not replay earlier changes. Resolve reported errors before unrelated work.\n</file-state>",
++        entries.into_iter().map(|(_, e)| e).collect::<Vec<_>>().join("\n"))
++}
++
+ /// The last `max` characters of `text`.
+ fn tail_chars(text: &str, max: usize) -> String {
+     let n = text.chars().count();
+@@ -172,7 +208,7 @@ impl Notes {
+         if self.is_empty() && !dropped {
+             return None;
+         }
+-        let mut out = String::from("\n\n<working-notes>\n");
++        let mut out = format!("\n\n{NOTES_TAG}\n");
+         if !self.model.trim().is_empty() {
+             out.push_str(&cut(self.model.trim(), BLOCK_MODEL_CHARS));
+             out.push('\n');
+@@ -329,6 +365,11 @@ pub fn summarize(messages: &[Value], indices: &[usize], label: &str, build_faile
+                 if let Some(rest) = t.strip_prefix(build_failed_prefix) {
+                     let first = rest.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+                     parts.push(format!("build FAILED: {}", cut(first, 140)));
++                } else {
++                    let request = crate::engine::strip_system_reminders(&t);
++                    if !request.trim().is_empty() {
++                        parts.insert(0, format!("User request: {}", cut(request.trim(), 250)));
++                    }
+                 }
+             }
+             _ => {}
+@@ -459,4 +500,17 @@ mod tests {
+         let m = vec![json!({"role": "system", "content": "s"})];
+         assert_eq!(summarize(&m, &[], "r1", "x"), None);
+     }
++    #[test]
++    fn file_evidence_survives_without_model_notes_and_updates_after_repair() {
++        let mut history = openai("a", "edit", json!({"path":"View.swift"}), "Error: old_text not found");
++        assert!(file_state(&history).contains("last edit FAILED"));
++        history.extend(openai("b", "edit", json!({"path":"View.swift"}), "patched View.swift\n[Xcode diagnostics: no errors]"));
++        let state = file_state(&history);
++        assert!(!state.contains("FAILED"));
++        assert!(state.contains("no errors"));
++        assert_eq!(state.matches("View.swift").count(), 1);
++        history.extend(native("write_file", json!({"path":"Other.swift"}), "wrote file"));
++        assert!(file_state(&history).contains("Other.swift"));
++    }
++
+ }
+--- a/src/protocol.rs
++++ b/src/protocol.rs
+@@ -157,22 +157,25 @@ impl Session {
+ }
+ 
+ impl Session {
+-    /// Trim conversation history to keep the system prompt + last `max_turns` pairs.
+-    /// Each "turn" = one user message + one assistant message.
+-    /// The system prompt (first message) is always preserved.
++    /// Trim only at a user-turn boundary, never between tool calls and results.
++    /// Summarize discarded history before removing it from memory.
+     pub fn trim_history(&mut self, max_turns: usize) {
+-        // messages[0] = system prompt, then alternating user/assistant
+-        let keep = max_turns * 2; // user + assistant per turn
+-        if self.messages.len() > keep + 1 {
+-            let removed = self.messages.len() - keep - 1;
+-            let system = self.messages[0].clone();
+-            let tail = self.messages.split_off(self.messages.len() - keep);
+-            self.messages = vec![system];
+-            self.messages.extend(tail);
++        if max_turns == 0 { return; }
++        let target = self.messages.len().saturating_sub(max_turns.saturating_mul(2));
++        let cut = (target.max(1)..self.messages.len())
++            .find(|&i| self.messages[i]["role"] == "user");
++        if let Some(cut) = cut.filter(|&i| i > 1) {
++            let indices: Vec<usize> = (1..cut).collect();
++            if let Some(summary) = crate::notes::summarize(&self.messages, &indices, "Earlier turns", "The build failed") {
++                self.notes.add_auto(&summary);
++            }
++            let removed = cut - 1;
++            self.messages.drain(1..cut);
+             self.persisted_len = self.persisted_len.saturating_sub(removed).max(1);
+             self.history_offset += removed;
+         }
+     }
++
+ }
+ 
+ /// ACP-layer error codes following JSON-RPC 2.0 conventions.
+@@ -229,3 +232,28 @@ impl AcpError {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod history_tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn trimming_keeps_tool_pairs_and_summarizes_the_goal() {
++        let mut s = Session::new(json!({"role":"system","content":"agent"}), PathBuf::from("/tmp"), ProtocolVersion::V1);
++        s.messages.extend(vec![
++            json!({"role":"user","content":"Fix the library screen"}),
++            json!({"role":"assistant","tool_calls":[{"id":"a","function":{"name":"read_file","arguments":"{}"}}]}),
++            json!({"role":"tool","tool_call_id":"a","content":"file contents"}),
++            json!({"role":"assistant","content":"Failed to finish"}),
++            json!({"role":"user","content":"continue"}),
++        ]);
++        s.persisted_len = s.messages.len();
++        s.trim_history(1);
++        assert_eq!(s.messages.len(), 2);
++        assert_eq!(s.messages[1]["content"], "continue");
++        assert!(s.notes.render().contains("Fix the library screen"));
++        assert_eq!(s.history_offset, 4);
++        assert_eq!(s.persisted_len, 2);
++    }
++}
+--- a/src/tools.rs
++++ b/src/tools.rs
+@@ -985,6 +985,53 @@ pub fn execute_tool(working_dir: &Path, name: &str, arguments: &Value) -> String
+     }
+ }
+ 
++/// Fresh, sandboxed evidence after a rejected edit; never repairs by guessing.
++pub fn edit_recovery_context(working_dir: &Path, args: &Value) -> String {
++    let path = args.get("path").and_then(Value::as_str).unwrap_or("");
++    let current = execute_read_file(working_dir, path);
++    if current.starts_with("Error") { return current; }
++    let old = args.get("old_text").and_then(Value::as_str).unwrap_or("");
++    let mut evidence = format!("Edit recovery for {path}. The failed edit did not change this file.\n");
++    if !old.is_empty() {
++        let matches: Vec<_> = current.match_indices(old).collect();
++        evidence.push_str(&format!("The rejected old_text matches {} location(s).\n", matches.len()));
++        if matches.is_empty() {
++            evidence.push_str(&near_miss(&current, old));
++        }
++        for (offset, _) in matches.iter().take(6) {
++            let line = current[..*offset].bytes().filter(|&c| c == b'\n').count() + 1;
++            let snippet = current.lines().skip(line.saturating_sub(2)).take(4).collect::<Vec<_>>().join("\n");
++            evidence.push_str(&format!("Match near line {line}:\n{}\n", snippet.chars().take(800).collect::<String>()));
++        }
++    }
++    evidence.push_str("Current file (read from disk, not an earlier proposed edit):\n");
++    evidence.extend(current.chars().take(10000));
++    if current.chars().count() > 10000 { evidence.push_str("\n[Truncated; read_file can retrieve another line range.]"); }
++    evidence.push_str("\nChoose a change that addresses the user's request and diagnostics. For edit, copy a unique block from this current file and provide different replacement text. Do not rename unrelated symbols to silence an error. If the desired text already exists, verify the remaining problem instead of editing it again. If no justified correction is available, report the blocker.");
++    evidence
++}
++
++/// Why an `old_text` that matches nothing failed, when it is one of the
++/// two usual slips: a placeholder line ("// ...") standing for code the
++/// model left out, or text that differs only in spacing.
++fn near_miss(current: &str, old: &str) -> String {
++    let placeholder = old.lines().map(str::trim).find(|line| {
++        let bare = line
++            .trim_start_matches(['/', '*', '#', '<', '!', '-'])
++            .trim_end_matches(['/', '*', '>', '-'])
++            .trim();
++        (bare.starts_with("...") || bare.starts_with('…')) && !current.contains(*line)
++    });
++    if let Some(line) = placeholder {
++        return format!("old_text contains the placeholder line \"{line}\", which is not in the file. old_text must be a verbatim copy: use a smaller block without placeholders.\n");
++    }
++    let squash = |s: &str| s.split_whitespace().collect::<String>();
++    if squash(current).contains(&squash(old)) {
++        return "old_text differs from the file only in spaces or line breaks: copy it again with the file's exact spacing.\n".into();
++    }
++    String::new()
++}
++
+ fn execute_read_file(working_dir: &Path, relative_path: &str) -> String {
+     let Some(path) = resolve_sandboxed_path(working_dir, relative_path) else {
+         return format!(
+@@ -1402,6 +1449,10 @@ fn execute_write_file(working_dir: &Path, relative_path: &str, content: &str) ->
+         Err(e) => return e,
+     };
+ 
++    if std::fs::read_to_string(&target).is_ok_and(|current| current == content) {
++        return "Error: file already has identical content; no change made".to_string();
++    }
++
+     if let Some(parent) = target.parent() {
+         if let Err(e) = std::fs::create_dir_all(parent) {
+             return format!("Error creating parent directory: {e}");
+@@ -1433,6 +1484,10 @@ fn execute_edit(working_dir: &Path, relative_path: &str, old_text: &str, new_tex
+         return "Error: old_text is empty; refusing to do an open-ended replace".to_string();
+     }
+ 
++    if old_text == new_text {
++        return "Error: old_text and new_text are identical; no change made".to_string();
++    }
++
+     // Use the same sandbox resolver as read_file so we cannot escape.
+     let Some(path) = resolve_sandboxed_path(working_dir, relative_path) else {
+         return format!(
+@@ -1452,7 +1507,7 @@ fn execute_edit(working_dir: &Path, relative_path: &str, old_text: &str, new_tex
+     let occurrences = original.matches(old_text).count();
+     if occurrences == 0 {
+         return format!(
+-            "Error: old_text not found in {}. Re-read the file and provide the exact current text.",
++            "Error: old_text not found in {}. old_text must be an exact copy of text in the current file.",
+             relative_path
+         );
+     }
+@@ -1853,6 +1908,60 @@ mod tests {
+         let _ = fs::remove_dir_all(&wd);
+     }
+ 
++    #[test]
++    fn writing_identical_content_is_not_progress() {
++        let wd = tmpwd();
++        fs::write(wd.join("f.txt"), "unchanged").unwrap();
++        let before = fs::metadata(wd.join("f.txt")).unwrap().modified().unwrap();
++        assert!(execute_write_file(&wd, "f.txt", "unchanged").starts_with("Error: file already has identical content"));
++        assert_eq!(fs::metadata(wd.join("f.txt")).unwrap().modified().unwrap(), before);
++        let _ = fs::remove_dir_all(wd);
++    }
++
++    #[test]
++    fn edit_rejects_identical_replacement_without_writing() {
++        let wd = tmpwd();
++        fs::write(wd.join("f.txt"), "some Scene").unwrap();
++        let before = fs::metadata(wd.join("f.txt")).unwrap().modified().unwrap();
++        let result = execute_edit(&wd, "f.txt", "some Scene", "some Scene");
++        assert!(result.starts_with("Error: old_text and new_text are identical"));
++        assert_eq!(fs::metadata(wd.join("f.txt")).unwrap().modified().unwrap(), before);
++        assert_eq!(fs::read_to_string(wd.join("f.txt")).unwrap(), "some Scene");
++        let _ = fs::remove_dir_all(wd);
++    }
++
++    #[test]
++    fn failed_edit_recovery_shows_real_matches_without_modifying_file() {
++        let wd = tmpwd();
++        let source = "struct ContentView: View {\n var body: some Scene { EmptyView() }\n}\nlet preview = ContentView()\n";
++        fs::write(wd.join("a.swift"), source).unwrap();
++        let evidence = edit_recovery_context(&wd, &json!({"path":"a.swift", "old_text":"ContentView"}));
++        assert!(evidence.contains("matches 2 location(s)"));
++        assert!(evidence.contains("Match near line 1") && evidence.contains("Match near line 4"));
++        assert!(evidence.contains(source));
++        assert_eq!(fs::read_to_string(wd.join("a.swift")).unwrap(), source);
++        assert!(edit_recovery_context(&wd, &json!({"path":"../outside.swift"})).starts_with("Error"));
++        let _ = fs::remove_dir_all(wd);
++    }
++
++    #[test]
++    fn failed_edit_recovery_names_placeholders_and_spacing_slips() {
++        let wd = tmpwd();
++        let source = "class Library {\n    func add() {\n        guard ok else { return }\n    }\n    .frame(maxWidth: .infinity)\n}\n";
++        fs::write(wd.join("a.swift"), source).unwrap();
++        // Recorded in Xcode: old_text with "// ..." standing for the body.
++        let elided = "class Library {\n    func add() {\n        // ...\n    }\n";
++        let evidence = edit_recovery_context(&wd, &json!({"path":"a.swift", "old_text": elided}));
++        assert!(evidence.contains("placeholder line \"// ...\""), "{evidence}");
++        // Recorded in Xcode: one missing space.
++        let spaced = ".frame(maxWidth:.infinity)";
++        let evidence = edit_recovery_context(&wd, &json!({"path":"a.swift", "old_text": spaced}));
++        assert!(evidence.contains("only in spaces or line breaks"), "{evidence}");
++        let other = edit_recovery_context(&wd, &json!({"path":"a.swift", "old_text": "struct Song"}));
++        assert!(!other.contains("placeholder") && !other.contains("only in spaces"), "{other}");
++        let _ = fs::remove_dir_all(wd);
++    }
++
+     #[test]
+     fn edit_rejects_empty_old_text() {
+         let wd = tmpwd();
+--- a/tests/integration_test.rs
++++ b/tests/integration_test.rs
+@@ -1589,7 +1589,7 @@ async fn test_file_tool_calls_carry_diff_locations_and_raw_input() {
+     let file = format!("{cwd}/src/new.txt");
+     let mut h = TestHarness::start_with_router_and_env(
+         port,
+-        mock_llm_scripted_router(file_tools_script()),
++        mock_llm_sequence_router(file_tools_script()).0,
+         &[("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1"))],
+     )
+     .await;
+@@ -1627,6 +1627,7 @@ async fn test_file_tool_calls_carry_diff_locations_and_raw_input() {
+             "Create the file first.",
+             "Now extend it.",
+             "Try a stale edit.",
++            "[acp-bridge] Edit rejected; checking current file and diagnostics before retrying.",
+             "Check the result.",
+             "Run the checks.",
+             "All good."
+@@ -1739,7 +1740,7 @@ async fn test_v2_tool_calls_use_upserts_and_v2_diff_shape() {
+     let file = format!("{cwd}/src/new.txt");
+     let mut h = TestHarness::start_with_router_and_env(
+         port,
+-        mock_llm_scripted_router(file_tools_script()),
++        mock_llm_sequence_router(file_tools_script()).0,
+         &[("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1"))],
+     )
+     .await;
+@@ -1758,9 +1759,9 @@ async fn test_v2_tool_calls_use_upserts_and_v2_diff_shape() {
+ 
+     assert!(updates_of(&notifications, "tool_call").is_empty());
+     let thoughts = updates_of(&notifications, "agent_thought_chunk");
+-    assert_eq!(thoughts.len(), 6);
++    assert_eq!(thoughts.len(), 7);
+     assert_eq!(thoughts[0]["messageId"], format!("{message_id}-thought-1"));
+-    assert_eq!(thoughts[5]["messageId"], format!("{message_id}-thought-6"));
++    assert_eq!(thoughts[6]["messageId"], format!("{message_id}-thought-7"));
+ 
+     let updates = updates_of(&notifications, "tool_call_update");
+     assert_eq!(updates.len(), 10, "start + completion per call");
+@@ -2494,3 +2495,250 @@ async fn test_bash_timeout_fails_the_call_and_the_turn_continues() {
+     h.shutdown();
+     let _ = std::fs::remove_dir_all(&project);
+ }
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn test_identical_edit_loop_returns_visible_failure_after_three_calls() {
++    let count = Arc::new(AtomicUsize::new(0));
++    let observed = count.clone();
++    let router = Router::new()
++        .route("/v1/models", get(mock_models))
++        .route("/v1/chat/completions", post(move |req: Request<Body>| {
++            let count = count.clone();
++            async move {
++                let n = count.fetch_add(1, Ordering::SeqCst);
++                if n >= 3 {
++                    let bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024).await.unwrap();
++                    let body: Value = serde_json::from_slice(&bytes).unwrap();
++                    let messages = body["messages"].as_array().unwrap();
++                    assert!(messages.iter().any(|m| m["role"] == "assistant" && m["content"].as_str().unwrap_or("").contains("incomplete")));
++                }
++                if n == 5 {
++                    return axum::Json(json!({"choices":[{"message":{"role":"assistant","content":"Resumed successfully."},"finish_reason":"stop"}]}));
++                }
++                axum::Json(json!({"choices":[{"message":{
++                    "role":"assistant", "content":null, "tool_calls":[{
++                        "id":"noop", "type":"function", "function":{
++                            "name":"edit", "arguments":"{\"path\":\"unused.swift\",\"old_text\":\"some Scene\",\"new_text\":\"some Scene\"}"
++                        }
++                    }]
++                },"finish_reason":"tool_calls"}]}))
++            }
++        }));
++    let port = free_port();
++    let mut h = TestHarness::start_with_router_and_env(port, router, &[
++        ("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1")),
++        ("LLM_INVESTIGATE_LIMIT", "0"),
++    ]).await;
++    h.send(&json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}));
++    let sid = h.read_line()["result"]["sessionId"].as_str().unwrap().to_string();
++    h.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{
++        "sessionId":sid,"prompt":[{"type":"text","text":"fix the view"}]
++    }}));
++    let (_, response) = h.read_until_response(2);
++    assert_eq!(observed.load(Ordering::SeqCst), 3);
++    assert_eq!(response["result"]["status"], "failed");
++    let text = response["result"]["text"].as_str().unwrap();
++    assert!(text.contains("identical") && text.contains("incomplete"), "{text}");
++    h.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{
++        "sessionId":sid,"prompt":[{"type":"text","text":"continue"}]
++    }}));
++    let (_, resumed) = h.read_until_response(3);
++    assert_eq!(observed.load(Ordering::SeqCst), 6);
++    assert_eq!(resumed["result"]["status"], "completed");
++    assert_eq!(resumed["result"]["text"], "Resumed successfully.");
++    h.shutdown();
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn test_oversized_prompt_returns_actionable_error_without_model_request() {
++    let count = Arc::new(AtomicUsize::new(0));
++    let observed = count.clone();
++    let router = Router::new()
++        .route("/v1/models", get(mock_models))
++        .route("/v1/chat/completions", post(move || {
++            count.fetch_add(1, Ordering::SeqCst);
++            async { axum::Json(json!({"choices":[{"message":{"role":"assistant","content":"Recovered."},"finish_reason":"stop"}]})) }
++        }));
++    let port = free_port();
++    let mut h = TestHarness::start_with_router_and_env(port, router, &[
++        ("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1")),
++        ("LLM_MODEL_CONTEXT", "8192"), ("LLM_MAX_TOKENS", "2048"),
++    ]).await;
++    h.send(&json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}));
++    let sid = h.read_line()["result"]["sessionId"].as_str().unwrap().to_string();
++    h.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{
++        "sessionId":sid,"prompt":[{"type":"text","text":"oversized ".repeat(15000)}]
++    }}));
++    let (_, response) = h.read_until_response(2);
++    assert_eq!(observed.load(Ordering::SeqCst), 0);
++    assert_eq!(response["result"]["status"], "failed");
++    assert!(response["result"]["text"].as_str().unwrap().contains("Shorten the current request"));
++    h.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{
++        "sessionId":sid,"prompt":[{"type":"text","text":"Only explain the next step briefly."}]
++    }}));
++    let (_, resumed) = h.read_until_response(3);
++    assert_eq!(observed.load(Ordering::SeqCst), 1);
++    assert_eq!(resumed["result"]["status"], "completed");
++    assert_eq!(resumed["result"]["text"], "Recovered.");
++    h.shutdown();
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn test_failed_edit_recovers_using_fresh_file_evidence() {
++    let wd = std::env::temp_dir().join(format!("acp-recovery-{}", uuid::Uuid::new_v4()));
++    std::fs::create_dir_all(&wd).unwrap();
++    std::fs::write(wd.join("view.txt"), "screen=old\npreview=old\n").unwrap();
++    let count = Arc::new(AtomicUsize::new(0));
++    let router = Router::new().route("/v1/models", get(mock_models))
++        .route("/v1/chat/completions", post(move |req: Request<Body>| {
++            let count = count.clone();
++            async move {
++                let n = count.fetch_add(1, Ordering::SeqCst);
++                let body: Value = serde_json::from_slice(&axum::body::to_bytes(req.into_body(), 1024*1024).await.unwrap()).unwrap();
++                if n == 1 {
++                    let messages = body["messages"].as_array().unwrap();
++                    let evidence = messages.iter().filter_map(|m| m["content"].as_str()).collect::<Vec<_>>().join("\n");
++                    assert!(evidence.contains("screen=old\npreview=old"));
++                    assert!(evidence.contains("matches 2 location(s)"));
++                    assert!(!messages.iter().any(|m| m.get("tool_calls").is_some()));
++                }
++                if n >= 2 {
++                    return axum::Json(json!({"choices":[{"message":{"role":"assistant","content":"Corrected the view; preview preserved."},"finish_reason":"stop"}]}));
++                }
++                let old = if n == 0 { "old" } else { "screen=old" };
++                let new = if n == 0 { "new" } else { "screen=new" };
++                axum::Json(json!({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{
++                    "id":format!("edit{n}"),"type":"function","function":{"name":"edit","arguments":json!({"path":"view.txt","old_text":old,"new_text":new}).to_string()}
++                }]},"finish_reason":"tool_calls"}]}))
++            }
++        }));
++    let port = free_port();
++    let mut h = TestHarness::start_with_router_and_env(port, router, &[
++        ("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1")), ("LLM_VERIFY", "off")
++    ]).await;
++    h.send(&json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":wd}}));
++    let sid = h.read_line()["result"]["sessionId"].as_str().unwrap().to_string();
++    h.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"Change view to new, preserve preview"}]}}));
++    let (_, result) = h.read_until_response(2);
++    assert_eq!(result["result"]["status"], "completed");
++    assert_eq!(std::fs::read_to_string(wd.join("view.txt")).unwrap(), "screen=new\npreview=old\n");
++    h.shutdown();
++    std::fs::remove_dir_all(wd).unwrap();
++}
++
++/// A write_file or edit carrying one of the bridge's placeholders (copied
++/// from a compacted request) is refused and leaves the file as it was.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn test_placeholder_writes_are_refused_and_leave_the_file() {
++    let project = fresh_project_dir("placeholder");
++    std::fs::write(project.join("src/app.txt"), "real\n").unwrap();
++    let port = free_port();
++    let (router, recorded) = mock_llm_sequence_router(vec![
++        scripted_tool_call("", "w1", "write_file", json!({"path":"src/app.txt",
++            "content":"[contents of src/app.txt elided - call read_file for the current version]"})),
++        scripted_tool_call("", "e1", "edit", json!({"path":"src/app.txt", "old_text":"real",
++            "new_text":"[Older copy of src/app.txt omitted - it was read again later; use the later result.]"})),
++        final_answer("Stopped."),
++    ]);
++    let mut h = TestHarness::start_with_router_and_env(port, router, &[
++        ("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1")), ("LLM_VERIFY", "off"),
++    ]).await;
++    h.send(&json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":project}}));
++    let sid = h.read_line()["result"]["sessionId"].as_str().unwrap().to_string();
++    h.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"Restore the file"}]}}));
++    let (notifications, response) = h.read_until_response(2);
++    assert_eq!(response["result"]["stopReason"], "end_turn");
++    assert_eq!(std::fs::read_to_string(project.join("src/app.txt")).unwrap(), "real\n");
++    let done = updates_of(&notifications, "tool_call_update");
++    assert!(done.iter().filter(|u| u["status"] == "failed").count() >= 2, "{done:?}");
++    let requests = recorded.lock().unwrap().clone();
++    let seen = requests[2]["messages"].to_string();
++    assert!(seen.contains("Not run: content contains") && seen.contains("Not run: new_text contains"), "{seen}");
++    h.shutdown();
++}
++
++/// A Client that advertises `session.notices` gets the bridge's own status
++/// as `notice` updates; thought chunks then carry only model reasoning
++/// (Xcode joins consecutive thought chunks into one "thinking" block).
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn test_bridge_status_is_a_notice_when_the_client_supports_it() {
++    let port = free_port();
++    let project = fresh_project_dir("notices");
++    let cwd = project.to_str().unwrap().to_string();
++    let mut h = TestHarness::start_with_router_and_env(
++        port,
++        mock_llm_sequence_router(file_tools_script()).0,
++        &[("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1"))],
++    )
++    .await;
++    h.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize",
++        "params":{"protocolVersion":1,"clientCapabilities":{"session":{"notices":{}}}}}));
++    let _ = h.read_line();
++    h.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":&cwd}}));
++    let sid = h.read_line()["result"]["sessionId"].as_str().unwrap().to_string();
++    h.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt",
++        "params":{"sessionId":&sid,"prompt":[{"type":"text","text":"make the file"}]}}));
++    let (notifications, response) = h.read_until_response(3);
++    assert_eq!(response["result"]["stopReason"], "end_turn");
++    let notices = updates_of(&notifications, "notice");
++    assert_eq!(notices.len(), 1, "{notices:?}");
++    assert_eq!(notices[0]["severity"], "info");
++    assert_eq!(notices[0]["title"], "Edit rejected; checking current file and diagnostics before retrying.");
++    let thoughts = updates_of(&notifications, "agent_thought_chunk");
++    assert!(thoughts.iter().all(|t| !t["content"]["text"].as_str().unwrap().contains("acp-bridge")), "{thoughts:?}");
++    assert_eq!(thoughts.len(), 6, "one per model round");
++    h.shutdown();
++}
++
++/// Even a model that only calls tools must reach verification and a terminal
++/// ACP response. Build errors trigger bounded repair, not a silent limit exit.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn test_tool_budget_builds_repairs_and_finishes_incomplete() {
++    let project = fresh_project_dir("budget-repair");
++    let port = free_port();
++    let (router, recorded) = mock_llm_sequence_router(vec![
++        scripted_tool_call("", "w1", "write_file", json!({"path":"src/app.txt","content":"BROKEN\n"})),
++        scripted_tool_call("", "w2", "write_file", json!({"path":"src/app.txt","content":"fixed\n"})),
++        final_answer("The existing changes are ready for review."),
++    ]);
++    let mut h = TestHarness::start_with_router_and_env(port, router, &[
++        ("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1")),
++        ("LLM_VERIFY", MARKER_BUILD), ("LLM_MAX_TOOL_ROUNDS", "1"),
++    ]).await;
++    h.send(&json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":project}}));
++    let sid = h.read_line()["result"]["sessionId"].as_str().unwrap().to_string();
++    h.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"Fix the file"}]}}));
++    let (notifications, response) = h.read_until_response(2);
++    assert_eq!(response["result"]["stopReason"], "max_turn_requests");
++    assert_eq!(response["result"]["status"], "failed");
++    let text = response["result"]["text"].as_str().unwrap();
++    assert!(text.contains("did not finish") && text.contains("Build succeeded."), "{text}");
++    assert_eq!(std::fs::read_to_string(project.join("src/app.txt")).unwrap(), "fixed\n");
++    assert_eq!(updates_of(&notifications, "tool_call").iter().filter(|u| u["name"] == "build").count(), 2);
++    let requests = recorded.lock().unwrap().clone();
++    assert_eq!(requests.len(), 2);
++    assert!(requests[1]["messages"].to_string().contains("BROKEN marker found"));
++    assert!(requests[1]["messages"].to_string().contains("<file-state>"));
++    h.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"Continue from the current files"}]}}));
++    let (_, resumed) = h.read_until_response(3);
++    assert_eq!(resumed["result"]["stopReason"], "end_turn");
++    assert!(recorded.lock().unwrap()[2]["messages"].to_string().contains("did not finish"));
++    h.shutdown();
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn test_empty_replies_end_with_explicit_incomplete_result() {
++    let port = free_port();
++    let (router, recorded) = mock_llm_sequence_router(vec![final_answer("")]);
++    let mut h = TestHarness::start_with_router_and_env(port, router, &[
++        ("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1")), ("LLM_VERIFY", "off"),
++    ]).await;
++    h.send(&json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}));
++    let sid = h.read_line()["result"]["sessionId"].as_str().unwrap().to_string();
++    h.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"Explain the result"}]}}));
++    let (_, result) = h.read_until_response(2);
++    assert_eq!(result["result"]["status"], "failed");
++    assert!(result["result"]["text"].as_str().unwrap().contains("incomplete"));
++    assert_eq!(recorded.lock().unwrap().len(), 3);
++    h.shutdown();
++}
+--- a/tests/tooling_test.rs
++++ b/tests/tooling_test.rs
+@@ -434,9 +434,10 @@ async fn step1_llm_timeout_is_not_retried() {
+     let _ = std::fs::remove_dir_all(&dir);
+ }
+ 
+-/// The context budget reserves LLM_RESERVE_OUTPUT_TOKENS, not the full
+-/// LLM_MAX_TOKENS: with max_tokens 8192 in a 12000-token context the old
+-/// budget (2784) would have dropped rounds; the reserve of 2000 keeps them.
++/// The context budget reserves the configured output (LLM_RESERVE_OUTPUT_TOKENS,
++/// never less than LLM_MAX_TOKENS so the reply fits): in a 12000-token
++/// context an 8192 reservation (budget 2784) would have dropped rounds; a
++/// reply cap and reserve of 2000 keep them.
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn step1_context_budget_uses_the_output_reservation() {
+     let dir = fresh_dir("reserve");
+@@ -455,7 +456,7 @@ async fn step1_context_budget_uses_the_output_reservation() {
+         script(writes),
+         &[
+             ("LLM_MODEL_CONTEXT", "12000"),
+-            ("LLM_MAX_TOKENS", "8192"),
++            ("LLM_MAX_TOKENS", "2000"),
+             ("LLM_RESERVE_OUTPUT_TOKENS", "2000"),
+         ],
+     )
+@@ -787,7 +788,7 @@ async fn step4_loop_is_discarded_and_retried_with_thinking_off() {
+         .iter()
+         .map(|u| u["content"]["text"].as_str().unwrap().to_string())
+         .collect();
+-    assert!(thoughts.iter().any(|t| t.contains("stopped a repeating line of reasoning")), "{thoughts:?}");
++    assert!(thoughts.iter().any(|t| t.contains("[acp-bridge] Stopped a repeating line of reasoning")), "{thoughts:?}");
+     assert!(!thoughts.iter().any(|t| t.contains("scene property is read-only")), "{thoughts:?}");
+     // The next turn starts with thinking on again.
+     let (_, r) = b.prompt(&sid, "thanks");
+@@ -964,7 +965,7 @@ async fn step6_dropped_rounds_are_summarized_once() {
+     replies.push(answer("read them all"));
+     let (mut b, recorded) = Bridge::start(
+         script(replies),
+-        &[("LLM_MODEL_CONTEXT", "6000"), ("LLM_RESERVE_OUTPUT_TOKENS", "1000"), ("LLM_INVESTIGATE_LIMIT", "0")],
++        &[("LLM_MODEL_CONTEXT", "6000"), ("LLM_MAX_TOKENS", "1000"), ("LLM_RESERVE_OUTPUT_TOKENS", "1000"), ("LLM_INVESTIGATE_LIMIT", "0")],
+     )
+     .await;
+     b.initialize(1);
+@@ -1388,7 +1389,10 @@ async fn step8b_swift_edits_get_xcode_diagnostics() {
+     );
+     assert!(results[1].ends_with("[Xcode diagnostics: no errors]"), "{}", results[1]);
+     assert!(!results[2].contains("Xcode diagnostics"), "{}", results[2]);
+-    assert!(!results[3].contains("Xcode diagnostics"), "ambiguous MyApp.swift: {}", results[3]);
++    // The last result also carries the <file-state> block (other files'
++    // evidence); only the result itself counts here.
++    let own = results[3].split("\n<file-state>").next().unwrap();
++    assert!(!own.contains("Xcode diagnostics"), "ambiguous MyApp.swift: {}", results[3]);
+     // The client keeps the diff first and shows the note after it.
+     let done = updates(&notes, "tool_call_update");
+     assert_eq!(done[0]["status"], "completed");
+@@ -1426,7 +1430,7 @@ async fn step8b_swift_edits_get_xcode_diagnostics() {
+     assert_eq!(r["result"]["stopReason"], "end_turn", "{r}");
+     assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+     let results = tool_results(recorded.lock().unwrap().last().unwrap());
+-    assert_eq!(results[0], "patched MyApp/GameView.swift (2354 bytes -> 2370 bytes)");
++    assert_eq!(results[0].split("\n<file-state>").next().unwrap(), "patched MyApp/GameView.swift (2354 bytes -> 2370 bytes)");
+     b.shutdown();
+ }
+ 
