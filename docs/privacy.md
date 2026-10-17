@@ -32,7 +32,8 @@ The Continue JetBrains plugin was dropped (deprecated and hidden from every JetB
 
 - **Model traffic stays local.** Every prompt sent from the Agent tab with `coder-local:latest` selected went to `127.0.0.1:8787` (the gateway) and from there to Ollama. Android Studio first tries `/v1/responses`, gets 404, and falls back to `/v1/chat/completions`.
 - **Android Studio's own Google traffic is separate from the model.** It keeps a connection open to Google, fetches server flags and experiment state, and downloads an Android docs index and lint jars from `maven.google.com`. With a Google account signed in to Gemini, it also sent a Gemini `RetrieveUserQuota` request while the Agent tab was in use. None of that carries prompts, but it is outbound traffic this repo can't switch off. Keep **Data Sharing** (usage statistics) off in Android Studio's settings.
-- **Not verified**: the agent's built-in `web_search` (a Gemini model with web search, not Brave) and `search_android_docs`/`fetch_android_docs` tools. The test's web-search turn ran after the connection sampling had stopped, so whether these reach Google while a local provider is selected is still open. So is whether the local provider works with the Google account signed out. Until a live audit settles it, don't use Android Studio's agent for web search.
+- **Its built-in web search is removed (since 2026-10-17).** The agent's `web_search` runs through a Gemini model, not Brave, and the prompt alone didn't stop the local model from calling a tool like it (2 of 3 test runs). The gateway now drops web search tools that aren't Brave-backed from every chat request: the name contains "search" plus "web", "internet", "google" or "bing", and neither the name nor the description mentions Brave. The model never sees the tool, so it can't call it. Documentation and code tools (`search_android_docs`, `fetch_android_docs`, Xcode's `docs_search`, `grep_search`, …) don't match and pass through. Checked through the gateway with the local model and a tool defined like Android Studio's, not yet inside Android Studio.
+- **Not verified**: whether `search_android_docs`/`fetch_android_docs` reach Google while a local provider is selected (the test's turn using them ran after the connection sampling had stopped), and whether the local provider works with the Google account signed out.
 
 ## Confirmed env vars (verified against current docs and a live run, 2026-10-06)
 
@@ -49,6 +50,8 @@ The Continue JetBrains plugin was dropped (deprecated and hidden from every JetB
 | `ANONYMIZED_TELEMETRY` | `false` | disables ChromaDB's telemetry |
 | `ENABLE_WEB_SEARCH` | `false` | keeps Open WebUI's *built-in* web search off — search goes through the Brave MCP tool instead |
 | `TOOL_SERVER_CONNECTIONS` | one MCP connection to `http://$BRAVE_MCP_HOST:$BRAVE_MCP_PORT/mcp`, auth none (`[]` without `BRAVE_API_KEY`) | registers the Brave MCP server as Open WebUI's only tool server, so users don't add it by hand. The key stays in the Brave process; Open WebUI only talks to it on loopback. Verified 2026-10-16 on 0.6.31: tool `server:mcp:brave` listed, and a chat with it on ran `brave_web_search` |
+
+**Brave Search is on by default in Open WebUI chats with the chat model** (since 2026-10-16). Open WebUI has no env var for default tools, so `stack.sh up` sets the model's Tools setting (`toolIds`) in Open WebUI's database. It creates a private entry if none exists, which keeps the model visible to admins only, as before. With search on, Open WebUI first asks the model whether to search and what to search for, on every message. Unlike the Xcode agent, Open WebUI has no code-level check on that query, so hard rule 3 (no source code in searches) rests on `prompts/system.md` alone. For chats about private code, switch Brave Search off in that chat (the wrench icon in the message box).
 | `RAG_EMBEDDING_ENGINE` | `ollama` | use local Ollama for embeddings |
 | `RAG_EMBEDDING_MODEL` | `nomic-embed-text` | — |
 | `ENABLE_RAG_HYBRID_SEARCH` | `false` | stays off; no reranker configured either |
@@ -102,7 +105,8 @@ The gateway binds only to loopback, ignores proxy environment variables and does
 not follow upstream redirects. Its destinations are fixed loopback inference and
 Open WebUI authentication endpoints; clients cannot select arbitrary URLs or
 models. Only text messages are accepted; remote media is refused.
-The shared privacy/system prompt is added server-side for Ollama.
+It also drops web search tools that aren't Brave-backed from chat requests (see the Android Studio section above), so whatever tools an IDE offers, the model can only search through Brave.
+The shared privacy/system prompt is added server-side for Ollama, followed by today's date (the gateway machine's local date, computed per request) so the model knows its training data may be out of date.
 
 Job bodies and retained results are in RAM only, never written by the gateway.
 Access logging is disabled; backend errors return a generic message rather than

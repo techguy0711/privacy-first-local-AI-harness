@@ -57,8 +57,8 @@ The command starts the inference gateway, Open WebUI and, when a Brave key is se
 
 ### 4. Finish the one-time Web UI settings
 
-- The inference gateway adds [prompts/system.md](prompts/system.md) to chat requests automatically.
-- With `BRAVE_API_KEY` set, `stack.sh up` adds **Brave Search** to Open WebUI for every user; there is nothing to configure. To search in a chat, click the button next to **+** in the message box, open **Tools**, and turn on **Brave Search**. Open WebUI connects to the local Brave MCP server, which holds the key, so the key never enters Open WebUI. Don't add tool connections in Admin Settings: Open WebUI forgets them at restart, because `stack.sh` makes `.env` authoritative.
+- The inference gateway adds [prompts/system.md](prompts/system.md) and today's date to chat requests automatically.
+- With `BRAVE_API_KEY` set, `stack.sh up` adds **Brave Search** to Open WebUI and turns it on by default in new `coder-local` chats; there is nothing to configure. The model decides when to search, for example for current events or the latest version of a tool. Each message then takes longer, because the model first decides whether to search. To turn search off for one chat, click the wrench icon in the message box and switch off **Brave Search**. `stack.sh up` turns it back on as the default for new chats, even if you turned it off in **Admin Settings → Models**. Open WebUI connects to the local Brave MCP server, which holds the key, so the key never enters Open WebUI. Don't add tool connections in Admin Settings: Open WebUI forgets them at restart, because `stack.sh` makes `.env` authoritative.
 
 ### 5. Connect your IDE
 
@@ -69,7 +69,7 @@ After running `./scripts/setup.sh --editors`:
 | IDE | Remaining steps |
 |---|---|
 | **VS Code** | Install the Continue extension. Turn off **Allow Anonymous Telemetry** in Continue and **Continue: Telemetry Enabled** in VS Code settings. |
-| **Android Studio** | Open **Settings → Tools → AI → Model Providers**, add the **Local Provider** (port `8787`) or, on a server, the **Third-Party Remote Provider** printed by setup, click **Refresh**, enable the model, and pick it in the **Agent** tab on the right sidebar. Don't ask its agent to search the web (see the IDE guide). The Continue JetBrains plugin is deprecated and can no longer be installed. |
+| **Android Studio** | Open **Settings → Tools → AI → Model Providers**, add the **Local Provider** (port `8787`) or, on a server, the **Third-Party Remote Provider** printed by setup, click **Refresh**, enable the model, and pick it in the **Agent** tab on the right sidebar. The gateway removes its built-in web search (Gemini), so use Open WebUI for current information (see the IDE guide). The Continue JetBrains plugin is deprecated and can no longer be installed. |
 | **Xcode agent** | Open **Settings → Intelligence → Agents → Add an Agent**. Enter the executable, arguments, and environment values printed by setup, and leave **Interpreter** empty. |
 
 See [the IDE guide](docs/editors.md) for full instructions and Xcode's plain-chat option. The Xcode agent edits files, builds through Xcode and fixes the errors, searches Apple's documentation on your Mac, and can use Brave search (guarded) while the stack is up. Xcode asks "Allow acp-bridge to access Xcode?" once per launch and after each rebuild — allow it.

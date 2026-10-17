@@ -8,6 +8,7 @@ import uuid
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import date
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -16,6 +17,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from services.config import ROOT, Settings
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'expired'}
+
+
+def foreign_web_search(tool):
+    """A web search tool an IDE offers that is not Brave-backed, such as
+    Android Studio's Gemini web_search. Brave tools name Brave in their name
+    (brave_web_search) or description (the Xcode agent's web_search)."""
+    fn = tool.get('function') if isinstance(tool, dict) else None
+    if not isinstance(fn, dict):
+        return False
+    name, desc = str(fn.get('name', '')).lower(), str(fn.get('description', '')).lower()
+    web = 'search' in name and any(w in name for w in ('web', 'internet', 'google', 'bing'))
+    return web and 'brave' not in name and 'brave' not in desc
 
 
 @dataclass
@@ -166,7 +179,8 @@ class Queue:
             if j.kind == 'chat':
                 body['model'] = self.cfg.model
                 messages = list(body['messages'])
-                prompt = self.prompt
+                # Per request, so a long-running gateway never serves a stale date.
+                prompt = f"{self.prompt.rstrip()}\n\nToday's date is {date.today():%A %d %B %Y}."
                 body['messages'] = [{'role': 'system', 'content': prompt}] + messages
                 base, route = self.cfg.upstream, '/chat/completions'
             else:
@@ -311,6 +325,22 @@ def create_app(cfg=None, transport=None):
             if cfg.backend == 'ollama':
                 allowed.add('reasoning_effort')
             body = {k: v for k, v in body.items() if k in allowed}
+            # Web search leaves only through Brave, so the model never sees
+            # another provider's search tool (the prompt alone didn't stop it).
+            if isinstance(body.get('tools'), list):
+                kept = [t for t in body['tools'] if not foreign_web_search(t)]
+                if len(kept) != len(body['tools']):
+                    names = {t['function'].get('name') for t in kept
+                             if isinstance(t, dict) and isinstance(t.get('function'), dict)}
+                    choice = body.get('tool_choice')
+                    chosen = choice.get('function') if isinstance(choice, dict) else None
+                    if not kept or (isinstance(chosen, dict) and chosen.get('name') not in names):
+                        body.pop('tool_choice', None)
+                    if kept:
+                        body['tools'] = kept
+                    else:
+                        body.pop('tools')
+                        body.pop('parallel_tool_calls', None)
         else:
             if body.get('model') != 'nomic-embed-text' or 'input' not in body:
                 raise HTTPException(400, 'Only nomic-embed-text embeddings are enabled')

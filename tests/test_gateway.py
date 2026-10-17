@@ -2,6 +2,7 @@ import asyncio
 import json
 import unittest
 from dataclasses import replace
+from datetime import date
 
 import httpx
 from services.config import Settings
@@ -76,12 +77,31 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0][0], 'http://127.0.0.1:11434/v1/chat/completions')
         self.assertEqual(self.calls[0][1]['messages'][0]['role'], 'system')
+        self.assertIn(f"Today's date is {date.today():%A %d %B %Y}.", self.calls[0][1]['messages'][0]['content'])
 
     async def test_ollama_keeps_model_sampling_defaults(self):
         self.app.state.queue.cfg = replace(self.cfg, backend='ollama')
         jid = (await self.submit({**BODY, 'tools': [{'type': 'function', 'function': {'name': 'write_file'}}]})).json()['id']
         await self.wait_for(lambda: self.app.state.queue.jobs[jid].state == 'completed')
         self.assertNotIn('temperature', self.calls[-1][1])
+
+    async def test_non_brave_web_search_tools_removed(self):
+        def tool(name, description=''):
+            return {'type': 'function', 'function': {'name': name, 'description': description}}
+        tools = [tool('web_search', 'Search the web for up-to-date results'), tool('search_web'), tool('read_file'),
+                 tool('brave_web_search'), tool('web_search', 'Search the public web (Brave)'),
+                 tool('docs_search', 'Search Apple documentation')]
+        choice = {'type': 'function', 'function': {'name': 'search_web'}}
+        jid = (await self.submit({**BODY, 'tools': tools, 'tool_choice': choice})).json()['id']
+        await self.wait_for(lambda: self.app.state.queue.jobs[jid].state == 'completed')
+        sent = self.calls[-1][1]
+        self.assertEqual([t['function']['name'] for t in sent['tools']],
+                         ['read_file', 'brave_web_search', 'web_search', 'docs_search'])
+        self.assertNotIn('tool_choice', sent)
+        jid = (await self.submit({**BODY, 'tools': [tool('google_search')], 'tool_choice': 'required',
+                                  'parallel_tool_calls': False})).json()['id']
+        await self.wait_for(lambda: self.app.state.queue.jobs[jid].state == 'completed')
+        self.assertFalse({'tools', 'tool_choice', 'parallel_tool_calls'} & self.calls[-1][1].keys())
 
     async def test_auth_isolation_and_spoofed_headers(self):
         j = (await self.submit()).json()['id']

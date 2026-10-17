@@ -123,6 +123,56 @@ start_openwebui() {
   echo "Open WebUI started (pid $(cat "$WEBUI_PID_FILE")); logs at logs/openwebui.log"
 }
 
+# Brave Search on by default in new chats with the chat model (off again
+# without a key). 0.6.31 has no env var for this: it is the model's Tools
+# setting (Admin Settings > Models), kept in Open WebUI's database. Open
+# WebUI's own model API is used so the schema matches the pinned version,
+# and only toolIds changes. A model with no entry yet gets a private one,
+# which is what Open WebUI does for models without one: only admins see it.
+# Importing Open WebUI empties STATIC_DIR and refills it from the frontend
+# build, so it gets a scratch STATIC_DIR (the running server's stays intact)
+# and FROM_INIT_PY=true, which `open-webui serve` sets to find that build.
+set_default_tools() {
+  local i ok=true static_tmp
+  for i in $(seq 1 60); do
+    curl -fsS --max-time 2 "http://$WEBUI_HOST:$WEBUI_PORT/health" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  static_tmp="$(mktemp -d)"
+  DATA_DIR="$REPO_ROOT/data/openwebui" STATIC_DIR="$static_tmp" FROM_INIT_PY=true \
+    WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" OFFLINE_MODE=true HF_HUB_OFFLINE=1 \
+    CHAT_MODEL="$CHAT_MODEL" BRAVE_ON="$([[ -n "${BRAVE_API_KEY:-}" ]] && echo 1 || echo 0)" \
+    "$REPO_ROOT/.venv/openwebui/bin/python" - >> "$LOG_DIR/openwebui.log" 2>&1 <<'PYEOF' || ok=false
+import os
+from open_webui.models.models import ModelForm, ModelMeta, ModelParams, Models
+from open_webui.models.users import Users
+
+model_id, tool, want = os.environ['CHAT_MODEL'], 'server:mcp:brave', os.environ['BRAVE_ON'] == '1'
+model = Models.get_model_by_id(model_id)
+if model is None:
+    if want:
+        admin = Users.get_super_admin_user()
+        private = {'read': {'group_ids': [], 'user_ids': []}, 'write': {'group_ids': [], 'user_ids': []}}
+        form = ModelForm(id=model_id, name=model_id, meta=ModelMeta(toolIds=[tool]), params=ModelParams(),
+                         access_control=private)
+        if Models.insert_new_model(form, admin.id if admin else '') is None:
+            raise SystemExit(1)
+else:
+    meta = model.meta.model_dump()
+    tool_ids = list(meta.get('toolIds') or [])
+    if want != (tool in tool_ids):
+        meta['toolIds'] = tool_ids + [tool] if want else [t for t in tool_ids if t != tool]
+        if Models.update_model_by_id(model_id, ModelForm(**{**model.model_dump(), 'meta': meta})) is None:
+            raise SystemExit(1)
+PYEOF
+  rm -rf "$static_tmp"
+  if ! $ok; then
+    echo "WARNING: could not set Open WebUI's default tools for $CHAT_MODEL; see logs/openwebui.log" >&2
+  elif [[ -n "${BRAVE_API_KEY:-}" ]]; then
+    echo "Brave Search: on by default in new $CHAT_MODEL chats"
+  fi
+}
+
 start_inference() {
   local python="$REPO_ROOT/.venv/openwebui/bin/python"
   if [[ ! -x "$python" || -z "${GATEWAY_SERVICE_KEY:-}" ]]; then
@@ -203,6 +253,7 @@ case "${1:-}" in
     start_inference
     start_openwebui
     start_brave
+    set_default_tools
     printf '%s' "$current_hash" > "$RUN_DIR/stack.env.sha256"
     echo
     echo "Web UI: http://$WEBUI_HOST:$WEBUI_PORT/"
