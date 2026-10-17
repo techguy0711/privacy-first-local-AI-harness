@@ -26,6 +26,14 @@ This directly violates "the only allowed outbound traffic is Brave Search API ca
 - **Setup-time traffic** (only when `bin/acp-bridge.stamp` doesn't match the pins, the patches or the installed binary): a `git clone` of `github.com/BlakeHung/acp-bridge` at tag `v0.9.2` (built only if it is the pinned commit) and cargo's crates.io index/crate downloads (exact versions from the upstream `Cargo.lock`, `--locked`), which cargo caches in `~/.cargo/registry` (outside the repo, shared with any other Rust builds on the Mac); with the crates already cached there, the build here fetched nothing (2026-10-11). The Rust toolchain itself (1.86 or newer) is a prerequisite you install with rustup (`sh.rustup.rs`, `static.rust-lang.org`) — `setup.sh` never installs it. The local model pull is now `gemma4:12b` (Ollama's registry, as before).
 - **Not yet re-audited live.** The points above come from the patch's code and its tests against mock MCP/Brave servers (non-loopback URLs never contacted, only the fixed Brave arguments sent, refused queries never arriving). A live connection audit of the patched build inside Xcode with a real Brave query, like the 2026-10-06 one below, is still to do.
 
+## Android Studio built-in model providers (partly verified live, 2026-10-15)
+
+The Continue JetBrains plugin was dropped (deprecated and hidden from every JetBrains IDE; see `docs/editors.md`). Android Studio Rabbit 1 | 2026.2.1 now talks to the gateway through its own **Local Provider** (or **Third-Party Remote Provider** in server mode). Method: one second `lsof` samples of Android Studio's TCP connections for 15 minutes, plus Android Studio's `idea.log`/`gemini-backend.log` and Ollama's request log.
+
+- **Model traffic stays local.** Every prompt sent from the Agent tab with `coder-local:latest` selected went to `127.0.0.1:8787` (the gateway) and from there to Ollama. Android Studio first tries `/v1/responses`, gets 404, and falls back to `/v1/chat/completions`.
+- **Android Studio's own Google traffic is separate from the model.** It keeps a connection open to Google, fetches server flags and experiment state, and downloads an Android docs index and lint jars from `maven.google.com`. With a Google account signed in to Gemini, it also sent a Gemini `RetrieveUserQuota` request while the Agent tab was in use. None of that carries prompts, but it is outbound traffic this repo can't switch off. Keep **Data Sharing** (usage statistics) off in Android Studio's settings.
+- **Not verified**: the agent's built-in `web_search` (a Gemini model with web search, not Brave) and `search_android_docs`/`fetch_android_docs` tools. The test's web-search turn ran after the connection sampling had stopped, so whether these reach Google while a local provider is selected is still open. So is whether the local provider works with the Google account signed out. Until a live audit settles it, don't use Android Studio's agent for web search.
+
 ## Confirmed env vars (verified against current docs and a live run, 2026-10-06)
 
 ### Open WebUI privacy/telemetry (set by `stack.sh`, all confirmed current)
@@ -40,6 +48,7 @@ This directly violates "the only allowed outbound traffic is Brave Search API ca
 | `SCARF_NO_ANALYTICS` | `true` | disables the Scarf install/runtime analytics pixel |
 | `ANONYMIZED_TELEMETRY` | `false` | disables ChromaDB's telemetry |
 | `ENABLE_WEB_SEARCH` | `false` | keeps Open WebUI's *built-in* web search off — search goes through the Brave MCP tool instead |
+| `TOOL_SERVER_CONNECTIONS` | one MCP connection to `http://$BRAVE_MCP_HOST:$BRAVE_MCP_PORT/mcp`, auth none (`[]` without `BRAVE_API_KEY`) | registers the Brave MCP server as Open WebUI's only tool server, so users don't add it by hand. The key stays in the Brave process; Open WebUI only talks to it on loopback. Verified 2026-10-16 on 0.6.31: tool `server:mcp:brave` listed, and a chat with it on ran `brave_web_search` |
 | `RAG_EMBEDDING_ENGINE` | `ollama` | use local Ollama for embeddings |
 | `RAG_EMBEDDING_MODEL` | `nomic-embed-text` | — |
 | `ENABLE_RAG_HYBRID_SEARCH` | `false` | stays off; no reranker configured either |

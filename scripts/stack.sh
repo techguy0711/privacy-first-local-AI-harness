@@ -99,6 +99,19 @@ start_openwebui() {
     export SCARF_NO_ANALYTICS=true
     export ANONYMIZED_TELEMETRY=false
     export ENABLE_WEB_SEARCH=false
+    # Brave Search reaches Open WebUI as an MCP tool server: the local Brave
+    # MCP server started below holds BRAVE_API_KEY, so Open WebUI never sees
+    # the key. Set here on every start because ENABLE_PERSISTENT_CONFIG=false
+    # drops connections added in Admin Settings at the next restart. Shape
+    # matches the Admin Settings > External Tools form in 0.6.31; users turn
+    # it on per chat.
+    if [[ -n "${BRAVE_API_KEY:-}" ]]; then
+      printf -v TOOL_SERVER_CONNECTIONS '[{"type":"mcp","url":"http://%s:%s/mcp","path":"","auth_type":"none","key":"","config":{"enable":true,"access_control":null},"info":{"id":"brave","name":"Brave Search","description":"Public web search through the local Brave MCP server"}}]' \
+        "$BRAVE_MCP_HOST" "$BRAVE_MCP_PORT"
+      export TOOL_SERVER_CONNECTIONS
+    else
+      export TOOL_SERVER_CONNECTIONS='[]'
+    fi
     nohup "$venv_bin" serve --host "$WEBUI_HOST" --port "$WEBUI_PORT" >> "$LOG_DIR/openwebui.log" 2>&1 &
     echo $! > "$WEBUI_PID_FILE"
   )
@@ -191,6 +204,11 @@ case "${1:-}" in
     start_openwebui
     start_brave
     printf '%s' "$current_hash" > "$RUN_DIR/stack.env.sha256"
+    echo
+    echo "Web UI: http://$WEBUI_HOST:$WEBUI_PORT/"
+    if [[ "$MODE" == "server" && -n "${SERVER_HOST:-}" ]]; then
+      echo "Team URL (through the HTTPS proxy in docs/server.md): https://$SERVER_HOST/"
+    fi
     ;;
   down)
     stop_proc "$GATEWAY_PID_FILE" "Inference gateway"

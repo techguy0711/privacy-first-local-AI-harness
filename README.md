@@ -33,7 +33,7 @@ If you already have a `.env`, keep it. Open `.env` and confirm `MODE=local`. Set
 
 ### 2. Install the stack and IDE support
 
-**Use `--editors` if you want VS Code, Android Studio / JetBrains, or Xcode support:**
+**Use `--editors` if you want VS Code, Android Studio, or Xcode support:**
 
 ```bash
 ./scripts/setup.sh --editors
@@ -41,7 +41,7 @@ If you already have a `.env`, keep it. Open `.env` and confirm `MODE=local`. Set
 
 This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-text`) and Open WebUI, writes `~/.continue/config.yaml` (backing up a different existing one), and copies the Brave key into this project's gitignored `.continue/.env`. On macOS it also builds the Xcode agent (`acp-bridge`) from source, which needs Rust — see the [prerequisites](#one-time-prerequisites).
 
-**Read the terminal output before closing it:** the script prints the exact paths and environment values to enter when registering the Xcode agent. Finish the IDE steps below after setup.
+**Read the terminal output before closing it:** the script prints the exact values to enter in Android Studio's model provider settings and the paths and environment values for registering the Xcode agent. Finish the IDE steps below after setup.
 
 For Web UI only, run `./scripts/setup.sh` instead.
 
@@ -51,14 +51,14 @@ For Web UI only, run `./scripts/setup.sh` instead.
 ./scripts/stack.sh up
 ```
 
-Open **[http://127.0.0.1:3000](http://127.0.0.1:3000)** in your browser (use your `WEBUI_PORT` if you changed it). Create your first account, which becomes admin, and select `coder-local` (Gemma 4 12B).
+Open the `Web UI:` address it prints at the end, **[http://127.0.0.1:3000/](http://127.0.0.1:3000/)** by default. Create your first account, which becomes admin, and select `coder-local` (Gemma 4 12B).
 
 The command starts the inference gateway, Open WebUI and, when a Brave key is set, the Brave MCP server. Ollama must already be running.
 
 ### 4. Finish the one-time Web UI settings
 
 - The inference gateway adds [prompts/system.md](prompts/system.md) to chat requests automatically.
-- If you enabled Brave search, go to **Settings → Admin Settings → Integrations → Add Connection**, choose **MCP (Streamable HTTP)**, and enter `http://127.0.0.1:8765`.
+- With `BRAVE_API_KEY` set, `stack.sh up` adds **Brave Search** to Open WebUI for every user; there is nothing to configure. To search in a chat, click the button next to **+** in the message box, open **Tools**, and turn on **Brave Search**. Open WebUI connects to the local Brave MCP server, which holds the key, so the key never enters Open WebUI. Don't add tool connections in Admin Settings: Open WebUI forgets them at restart, because `stack.sh` makes `.env` authoritative.
 
 ### 5. Connect your IDE
 
@@ -69,7 +69,7 @@ After running `./scripts/setup.sh --editors`:
 | IDE | Remaining steps |
 |---|---|
 | **VS Code** | Install the Continue extension. Turn off **Allow Anonymous Telemetry** in Continue and **Continue: Telemetry Enabled** in VS Code settings. |
-| **Android Studio / JetBrains** | Install the Continue plugin. Turn off **Allow Anonymous Telemetry** in Continue settings. |
+| **Android Studio** | Open **Settings → Tools → AI → Model Providers**, add the **Local Provider** (port `8787`) or, on a server, the **Third-Party Remote Provider** printed by setup, click **Refresh**, enable the model, and pick it in the **Agent** tab on the right sidebar. Don't ask its agent to search the web (see the IDE guide). The Continue JetBrains plugin is deprecated and can no longer be installed. |
 | **Xcode agent** | Open **Settings → Intelligence → Agents → Add an Agent**. Enter the executable, arguments, and environment values printed by setup, and leave **Interpreter** empty. |
 
 See [the IDE guide](docs/editors.md) for full instructions and Xcode's plain-chat option. The Xcode agent edits files, builds through Xcode and fixes the errors, searches Apple's documentation on your Mac, and can use Brave search (guarded) while the stack is up. Xcode asks "Allow acp-bridge to access Xcode?" once per launch and after each rebuild — allow it.
@@ -86,7 +86,7 @@ If a new Xcode agent conversation fails immediately with "JSON-RPC request … f
 
 ## Everyday use: start, check, stop
 
-Make sure Ollama is running, then start the Web UI and open **[http://127.0.0.1:3000](http://127.0.0.1:3000)**:
+Make sure Ollama is running, then start the Web UI and open the address it prints (**[http://127.0.0.1:3000/](http://127.0.0.1:3000/)** by default):
 
 ```bash
 ./scripts/stack.sh up

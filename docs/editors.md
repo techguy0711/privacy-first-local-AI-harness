@@ -1,6 +1,6 @@
 # Editors
 
-Covers Continue (VS Code and Android Studio/JetBrains), and Xcode's built-in chat provider support plus its ACP agent support (via `acp-bridge`). Chat and embeddings use the inference gateway: loopback in local mode, private TLS with personal Open WebUI API keys in server mode. The gateway sends inference requests to Ollama.
+Covers Continue (VS Code), Android Studio's built-in model providers, and Xcode's built-in chat provider support plus its ACP agent support (via `acp-bridge`). Chat and embeddings use the inference gateway: loopback in local mode, private TLS with personal Open WebUI API keys in server mode. The gateway sends inference requests to Ollama.
 
 ## Continue (VS Code)
 
@@ -20,15 +20,30 @@ Covers Continue (VS Code and Android Studio/JetBrains), and Xcode's built-in cha
 
 **Autocomplete**: off by default (commented out in both `config.local.yaml` and `config.server.yaml`) to save memory on the 16GB Mac. If you enable it, uncomment the `starcoder2:3b` block only — do **not** use Continue's own documented recommendation (`qwen2.5-coder`), which is not on the model allowlist.
 
-## Continue (Android Studio / JetBrains)
+## Android Studio
 
-Same mechanism: install the "Continue" plugin from the JetBrains Marketplace, then run `./scripts/setup.sh --editors` (it writes the same `~/.continue/config.yaml` and `.continue/.env` the JetBrains plugin reads). The telemetry toggle lives in the same Continue settings page inside the JetBrains IDE; there's no separate IDE-level override there the way there is in VS Code.
+Android Studio uses its own **model providers** setting to talk to the inference gateway. The Continue plugin is no longer an option. Checked 2026-10-15 on Android Studio Rabbit 1 | 2026.2.1 (build `AI-262.9437.185`).
 
-**Caveat (confirmed against the plugin's current marketplace listing, 2026-10-06):** Continue's JetBrains plugin is now described by the Continue team as **"community-maintained"** — they explicitly recommend their terminal CLI (`cn`) instead for non-VS-Code use, saying it's where active development is happening. The plugin is still functional and this plan still uses it (it's the only in-IDE option for Android Studio), but don't expect it to get the same attention as the VS Code extension. If it becomes unreliable, the documented alternative is running Continue's CLI from a terminal alongside Android Studio rather than as an in-IDE panel.
+**Why not Continue**: Continue's JetBrains plugin is tagged `deprecated` on the JetBrains Marketplace. The IDE-facing search and update endpoints return no Continue entry for any JetBrains build tried (Android Studio `AI-262` and `AI-251`, IntelliJ IDEA `IU-251` to `IU-262`), so it can't be found or installed from inside any JetBrains IDE. This is not a version lag: the last release (1.0.67, 2026-03-27) declares `since-build 241` with no upper bound. Continue's repository is read-only and 2.0.0 was its final release. Don't sideload the old zip, since it will get no fixes. `setup.sh --editors` still writes `~/.continue/config.yaml` for VS Code. Other JetBrains IDEs (IntelliJ IDEA, PyCharm, …) currently have no supported path in this repo.
 
-Also note: unlike VS Code, JetBrains has no built-in local embedder, so the `embed`-role model block in `config.yaml` is required there (it's already present in both committed configs).
+**Local mode** (start the stack first with `./scripts/stack.sh up`):
+1. Settings → Tools → AI → **Model Providers** → **+** → **Local Provider**.
+2. **Description**: `Gemma 4 12B (Local)`. **Port**: `8787` (or your `GATEWAY_PORT`). Android Studio then uses `http://localhost:<port>/v1` and detects the gateway as a generic OpenAI-compatible server through `/v1/models`.
+3. Click **Refresh**. `coder-local:latest` only appears after that. Enable it, then click OK.
+4. Open the **Agent** tab on the right sidebar (Rabbit 1 has no separate chat window) and pick `coder-local:latest` in its model picker.
 
-**Android Studio native alternative**: as of this writing, Android Studio has no first-party local/OpenAI-compatible model provider setting of its own (unlike Xcode) — the Continue plugin is the only documented path. If a native provider setting ships in a future Android Studio release, it would be configured the same way as Xcode's "Locally Hosted"/"Internet Hosted" flow described below.
+**Server mode:**
+1. Same dialog → **Third-Party Remote Provider**.
+2. **Description**: `Llama 3.3 70B (Server)`. **URL**: `https://<SERVER_HOST from .env>/v1`. **URL Schema**: OpenAI. **API key**: your personal Open WebUI API key (`sk-...`).
+3. **Refresh**, enable `coder-server:latest`, and pick it in the Agent tab's model picker.
+
+`setup.sh --editors` prints these values for your current `MODE`. Nothing is written to Android Studio's settings.
+
+**How it talks to the gateway**: Android Studio's OpenAI client tries the Responses API (`/v1/responses`) first. The gateway answers 404, and Android Studio switches that provider to `/v1/chat/completions`; its log shows `Falling back to Completion API. Error: 404`. Android Studio sends its instructions as `developer`-role messages, which `coder-local` follows like system messages. The gateway prepends `prompts/system.md` to every chat request, so Android Studio gets the same search rules as the other clients. Responses stream with no queue-position display (same as Continue).
+
+**Verified locally (2026-10-15, 16GB Mac, `coder-local`)**: a plain question and an Agent Mode request in the Agent tab were both answered by the local model through the gateway. Each agent turn sent 12.9K–14.8K prompt tokens (Android Studio's own agent prompt and tool definitions take about 12.5K), against the Modelfile's `num_ctx 16384`. Nothing was truncated, but long agent sessions are close to that limit. Turns took 17 s to 2.5 min. One request hit the gateway's `INFERENCE_TIMEOUT_SECONDS` (600 s) and Android Studio retried it on its own. For quick questions, Open WebUI or Xcode's plain chat is faster.
+
+**Privacy** (see `docs/privacy.md`): Google says it does not see prompts or responses exchanged with a third-party or local provider. Android Studio still contacts Google on its own, whichever model you pick (server flags, experiments, an Android docs index download, lint jars from `maven.google.com`). While a Google account is signed in to Gemini, it also checks that account's Gemini quota when the Agent tab is used; this happened during the test above. Its agent has a built-in `web_search` tool (run through a Gemini model, not Brave) and Android-docs tools (`search_android_docs`, `fetch_android_docs`), and this repo can't turn them off. **Not verified yet**: whether those tools reach Google while the local provider is selected, and whether the local provider works with the Google account signed out. Until that's checked, don't ask Android Studio's agent to search the web; use Open WebUI or the Xcode agent, which search through Brave. Turn off usage statistics under Settings → Appearance & Behavior → System Settings → **Data Sharing**.
 
 ## Xcode
 

@@ -304,6 +304,32 @@ if $INSTALL_EDITORS; then
   replace_if_changed "$NEW_CONTINUE_ENV" "$CONTINUE_ENV_FILE" " (BRAVE_API_KEY synced from .env; gitignored)"
   log "Remaining manual step: disable telemetry in the IDE (see docs/editors.md) -- it's an IDE toggle, not a config.yaml key."
 
+  # Android Studio: its own model providers setting replaces the deprecated
+  # Continue JetBrains plugin. Nothing is written to its settings; these are
+  # the values to enter (see docs/editors.md).
+  if [[ "$MODE" == "server" ]]; then
+    cat <<EOF
+
+Android Studio (Settings > Tools > AI > Model Providers > + > Third-Party Remote Provider):
+  Description: Llama 3.3 70B (Server)
+  URL:         https://$SERVER_HOST/v1
+  URL Schema:  OpenAI
+  API key:     your personal Open WebUI API key (sk-...)
+Then Refresh, enable coder-server:latest and pick it in the model picker of the
+Agent tab (right sidebar).
+EOF
+  else
+    cat <<EOF
+
+Android Studio (Settings > Tools > AI > Model Providers > + > Local Provider):
+  Description: Gemma 4 12B (Local)
+  Port:        ${GATEWAY_PORT:-8787}
+Then click Refresh (coder-local:latest appears only after that; the gateway must be
+running: ./scripts/stack.sh up), enable it, and pick it in the model picker of the
+Agent tab (right sidebar).
+EOF
+  fi
+
   # Xcode ACP agent (macOS only -- Xcode doesn't exist elsewhere). Built from
   # source: upstream tag v$ACP_BRIDGE_VERSION (must be commit $ACP_BRIDGE_COMMIT)
   # plus editors/acp/acp-bridge.patch (Xcode tools, guarded Brave search,
