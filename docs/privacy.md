@@ -93,7 +93,9 @@ ollama    127.0.0.1:11434 (LISTEN)
 python3   127.0.0.1:3000  (LISTEN)   -- Open WebUI
 node      127.0.0.1:8765  (LISTEN)   -- Brave MCP server
 ```
-No `0.0.0.0`/`*`/`::` binding on any of the three, confirmed via `lsof -nP -iTCP -sTCP:LISTEN` after a real `stack.sh up`. `doctor.sh`'s localhost-binding check automates this same check on every run.
+No `0.0.0.0`/`*`/`::` binding on any of the three, confirmed via `lsof -nP -iTCP -sTCP:LISTEN` after a real `stack.sh up`. `doctor.sh`'s localhost-binding check automates this same check on every run. Since 2026-10-18 it accepts only `127.0.0.1` and `[::1]` and fails any other address, including a LAN IP, not just wildcard binds.
+
+The inference gateway (`127.0.0.1:8787`) also listens on `[::1]:8787`, the IPv6 loopback, which is just as unreachable from the network. Android Studio connects to `localhost`. After one request timed out, its OpenAI client (OkHttp with `retryOnConnectionFailure(false)`) tried only `[::1]` and got "Connection refused" until Android Studio was restarted. `doctor.sh` checks that the gateway answers on `[::1]`.
 
 ## Secrets
 
@@ -101,7 +103,7 @@ Confirmed via `git status`/`git check-ignore -v`: `.env`, `.continue/.env`, `dat
 
 ## Inference gateway
 
-The gateway binds only to loopback, ignores proxy environment variables and does
+The gateway binds only to loopback (127.0.0.1 and ::1), ignores proxy environment variables and does
 not follow upstream redirects. Its destinations are fixed loopback inference and
 Open WebUI authentication endpoints; clients cannot select arbitrary URLs or
 models. Only text messages are accepted; remote media is refused.

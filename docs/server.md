@@ -33,6 +33,8 @@ Setup prepares the approved Ollama chat model, Nomic embeddings, the gateway, an
 
 Ollama runs separately through its app or service. The stack script manages the gateway, Open WebUI, and optional Brave MCP server. Their logs are under `logs/`.
 
+On Linux, `setup.sh` prints the `systemctl edit ollama.service` lines that give the Ollama service its prompt-cache limits (`LLAMA_ARG_CTX_CHECKPOINTS`, `LLAMA_ARG_CACHE_RAM` in `.env`), and `doctor.sh` checks the service has them. On a server with spare RAM and several users, raise `LLAMA_ARG_CACHE_RAM` so more conversations stay cached between turns.
+
 ## 3. Configure private HTTPS access
 
 Expose only the reverse proxy to the team network or VPN. On AWS, allow inbound TCP 443 from the team network and TCP 22 from administrator addresses. Do not expose the internal service ports directly.

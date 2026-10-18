@@ -37,7 +37,8 @@
 # until max_tokens (2026-10-09). Replaying that exact request at the defaults
 # finished in under 3 minutes with no repetition. acp-bridge also discards a
 # looping reply and retries once with thinking off ([guards] loop_check).
-# Reserve 4K for each reply so a 16K model retains more file/tool context.
+# Reserve 4K for each reply so the model's context (LLM_MODEL_CONTEXT) retains
+# more file/tool context.
 # Prefer focused edits: large whole-file writes can exceed this cap.
 # Truncated reasoning gets one recovery attempt; repeated truncation is visible.
 max_tokens = 4096

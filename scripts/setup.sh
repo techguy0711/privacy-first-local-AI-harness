@@ -151,6 +151,72 @@ else:
     print("  Linux: sudo systemctl restart ollama")
 PYEOF
 
+# ---------- 2b. Cap Ollama's prompt-cache RAM ----------
+# Ollama runs models through llama-server, which by default keeps up to 32
+# context checkpoints per conversation and an 8 GiB prompt cache in RAM. On a
+# 16 GB Mac that reached 6.9 GiB and pushed it deep into swap (2026-10-17).
+# llama-server reads LLAMA_ARG_* from its environment, which it inherits from
+# Ollama. Values come from .env via runtime.sh; empty leaves llama-server's own.
+OLLAMA_CACHE_ENV=()
+for var in LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM; do
+  if [[ -n "${!var}" ]]; then OLLAMA_CACHE_ENV+=("$var=${!var}"); fi
+done
+if [[ ${#OLLAMA_CACHE_ENV[@]} -gt 0 && "$(uname -s)" == "Darwin" ]]; then
+  # The Ollama app takes its environment from launchd (Ollama FAQ): set it for
+  # this login session, and keep a LaunchAgent that sets it again at each
+  # login, since launchctl setenv doesn't survive a reboot.
+  agent_cmd="" pending=false
+  for kv in "${OLLAMA_CACHE_ENV[@]}"; do
+    agent_cmd+="launchctl setenv ${kv%%=*} ${kv#*=}; "
+    if [[ "$(launchctl getenv "${kv%%=*}")" != "${kv#*=}" ]]; then
+      launchctl setenv "${kv%%=*}" "${kv#*=}"
+      pending=true
+    fi
+  done
+  agent="$HOME/Library/LaunchAgents/local-ai-harness.ollama-env.plist"
+  new_agent="$(cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local-ai-harness.ollama-env</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/sh</string><string>-c</string><string>${agent_cmd% }</string></array>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+EOF
+)"
+  if [[ "$(cat "$agent" 2>/dev/null)" != "$new_agent" ]]; then
+    mkdir -p "$(dirname "$agent")"
+    printf '%s\n' "$new_agent" > "$agent"
+    log "Wrote $agent (sets ${OLLAMA_CACHE_ENV[*]} at login)"
+  fi
+  running="$(ps eww -p "$(pgrep -f 'ollama serve' | head -1)" 2>/dev/null || true)"
+  for kv in "${OLLAMA_CACHE_ENV[@]}"; do
+    if [[ " $running " != *" $kv "* ]]; then pending=true; fi
+  done
+  if $pending; then
+    log "Ollama prompt-cache limits set (${OLLAMA_CACHE_ENV[*]}). Quit and reopen the Ollama app to apply them."
+  else
+    log "Ollama prompt-cache limits already applied (${OLLAMA_CACHE_ENV[*]})"
+  fi
+elif [[ ${#OLLAMA_CACHE_ENV[@]} -gt 0 ]]; then
+  current="$(systemctl show ollama --property=Environment 2>/dev/null || true)"
+  missing=()
+  for kv in "${OLLAMA_CACHE_ENV[@]}"; do
+    if [[ " ${current#Environment=} " != *" $kv "* ]]; then missing+=("$kv"); fi
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    log "Ollama prompt-cache limits are not set for the ollama service. Add them (needs sudo):"
+    echo "  sudo systemctl edit ollama.service    # then under [Service]:"
+    for kv in "${missing[@]}"; do echo "    Environment=\"$kv\""; done
+    echo "  sudo systemctl daemon-reload && sudo systemctl restart ollama"
+  else
+    log "Ollama prompt-cache limits already applied (${OLLAMA_CACHE_ENV[*]})"
+  fi
+fi
+
 # ---------- 3. Pull models for the current mode ----------
 if [[ "$MODE" == "server" ]]; then
   BASE_MODEL="llama3.3:70b"
@@ -391,7 +457,7 @@ Register it manually in Xcode (Settings > Intelligence > Agents > Add an Agent):
   Environment Variables:
     LLM_BASE_URL      = $ACP_LLM_BASE_URL
     LLM_MODEL         = $ACP_LLM_MODEL
-    LLM_MODEL_CONTEXT = 16384$ACP_API_KEY_LINE
+    LLM_MODEL_CONTEXT = $MODEL_CONTEXT$ACP_API_KEY_LINE
     LLM_QUEUE         = 1
     LLM_TIMEOUT       = $((EDITOR_TIMEOUT_MS / 1000))
 Xcode then asks "Allow acp-bridge to access Xcode?" -- once per Xcode launch and

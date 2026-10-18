@@ -3,12 +3,14 @@ import asyncio
 import hashlib
 import hmac
 import json
+import socket
 import time
 import uuid
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -356,7 +358,10 @@ def create_app(cfg=None, transport=None):
     @app.get('/v1/models')
     async def models(request: Request):
         await user(request)
-        return {'object': 'list', 'data': [{'id': cfg.model, 'object': 'model', 'owned_by': 'local-stack'}]}
+        # context_length lets clients that read it (Android Studio) compress
+        # their history before it fills the model's context.
+        return {'object': 'list', 'data': [{'id': cfg.model, 'object': 'model', 'owned_by': 'local-stack',
+                                            'context_length': cfg.context}]}
 
     @app.post('/v1/jobs', status_code=202)
     async def submit(request: Request):
@@ -428,3 +433,38 @@ def create_app(cfg=None, transport=None):
         return await completion(request, 'embed')
 
     return app
+
+
+def loopback_sockets(port):
+    """Bound sockets on 127.0.0.1 and ::1, never another interface. ::1 too
+    because clients that try "localhost" as ::1 first can otherwise get stuck:
+    Android Studio's OpenAI client (OkHttp with retryOnConnectionFailure off)
+    marks 127.0.0.1 failed after one timed-out request and then only tries ::1
+    until restarted. Skips ::1 where IPv6 is unavailable."""
+    sockets = []
+    for family, host in ((socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')):
+        try:
+            sock = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:
+            if family == socket.AF_INET6:
+                continue
+            raise
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if family == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            sock.close()
+            if family == socket.AF_INET6 and sockets:
+                continue
+            raise
+        sockets.append(sock)
+    return sockets
+
+
+if __name__ == '__main__':
+    import uvicorn
+    port = int(urlparse(Settings.read().gateway).port)
+    # One process for both sockets: the queue state is in memory.
+    uvicorn.Server(uvicorn.Config(create_app, factory=True, access_log=False)).run(sockets=loopback_sockets(port))

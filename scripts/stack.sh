@@ -180,8 +180,8 @@ start_inference() {
     exit 1
   fi
   if ! is_running "$GATEWAY_PID_FILE"; then
-    nohup "$python" -m uvicorn services.gateway:create_app --factory --host 127.0.0.1 \
-      --port "${GATEWAY_PORT:-8787}" --workers 1 --no-access-log >> "$LOG_DIR/gateway.log" 2>&1 &
+    # Listens on 127.0.0.1 and ::1 (loopback only); see loopback_sockets().
+    nohup "$python" -m services.gateway >> "$LOG_DIR/gateway.log" 2>&1 &
     echo $! > "$GATEWAY_PID_FILE"
     sleep 1
     if ! is_running "$GATEWAY_PID_FILE"; then

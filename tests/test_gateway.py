@@ -1,12 +1,13 @@
 import asyncio
 import json
+import socket
 import unittest
 from dataclasses import replace
 from datetime import date
 
 import httpx
 from services.config import Settings
-from services.gateway import Queue, create_app
+from services.gateway import Queue, create_app, loopback_sockets
 
 
 BODY = {'model': 'coder-server:latest', 'messages': [{'role': 'user', 'content': 'test'}]}
@@ -110,6 +111,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(r.status_code, 404)
         self.assertEqual((await self.submit(user='invalid')).status_code, 401)
         self.assertEqual((await self.client.get('/v1/models', headers={'Authorization': 'Bearer invalid'})).status_code, 401)
+        model = (await self.client.get('/v1/models')).json()['data'][0]
+        self.assertEqual((model['id'], model['context_length']), ('coder-server:latest', 16384))
 
     async def test_limits_and_fairness(self):
         self.block = True
@@ -219,14 +222,36 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get('/v1/jobs/' + jid, headers={'Authorization': 'Bearer bob'})).status_code, 200)
 
 
+class LoopbackSocketTests(unittest.TestCase):
+    def test_binds_both_loopbacks_only(self):
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        sockets = loopback_sockets(port)
+        try:
+            hosts = [s.getsockname()[0] for s in sockets]
+            self.assertEqual(hosts[0], '127.0.0.1')
+            self.assertEqual(hosts[1:], ['::1'] if socket.has_ipv6 and len(hosts) > 1 else [])
+            self.assertTrue(all(s.getsockname()[1] == port for s in sockets))
+        finally:
+            for s in sockets:
+                s.close()
+
+
 class ConfigTests(unittest.TestCase):
     def test_defaults_and_override(self):
         self.assertEqual(Settings.read({}).backend, 'ollama')
         self.assertEqual(Settings.read({'MODE': 'server'}).backend, 'ollama')
         self.assertEqual(Settings.read({'INFERENCE_BACKEND': 'ollama'}).model, 'coder-local:latest')
+        self.assertEqual(Settings.read({}).context, 32768)
+        self.assertEqual(Settings.read({'MODE': 'server'}).context, 16384)
+        cfg = Settings.read({'LLAMA_ARG_CACHE_RAM': '-1'})
+        self.assertEqual((cfg.ctx_checkpoints, cfg.cache_ram), ('4', '-1'))
+        self.assertEqual(Settings.read({'LLAMA_ARG_CTX_CHECKPOINTS': ''}).ctx_checkpoints, '')
         for env in ({'MODE': 'oops'}, {'INFERENCE_BACKEND': 'other'}, {'QUEUE_ACTIVE': '0'},
                     {'WEBUI_HOST': '0.0.0.0'}, {'OLLAMA_BASE_URL': 'https://external.test'},
-                    {'EMBED_MODEL': 'other'}, {'INFERENCE_BACKEND': 'unsupported'}):
+                    {'EMBED_MODEL': 'other'}, {'INFERENCE_BACKEND': 'unsupported'},
+                    {'LLAMA_ARG_CTX_CHECKPOINTS': '-1'}, {'LLAMA_ARG_CACHE_RAM': '1g'}):
             with self.assertRaises(ValueError):
                 Settings.read(env)
 

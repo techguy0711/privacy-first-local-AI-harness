@@ -1,5 +1,9 @@
 FROM gemma4:12b
-PARAMETER num_ctx 16384
+PARAMETER num_ctx 32768
+# 32K, not 16K: Android Studio's agent spends ~12.5K tokens on its own prompt
+# and tools, so at 16K its replies (file edits) were cut off at the context
+# limit. Costs ~300 MiB over 16K (sliding-window attention; measured
+# 2026-10-17). The gateway reports this to clients as context_length.
 # No temperature on purpose: gemma4's own defaults (temperature 1, top_k 64,
 # top_p 0.95) apply. 0.2 (tuned for llama3.1:8b) made its thinking loop for
 # minutes -- see editors/acp/config.toml.

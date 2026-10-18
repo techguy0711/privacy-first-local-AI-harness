@@ -41,6 +41,8 @@ If you already have a `.env`, keep it. Open `.env` and confirm `MODE=local`. Set
 
 This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-text`) and Open WebUI, writes `~/.continue/config.yaml` (backing up a different existing one), and copies the Brave key into this project's gitignored `.continue/.env`. On macOS it also builds the Xcode agent (`acp-bridge`) from source, which needs Rust — see the [prerequisites](#one-time-prerequisites).
 
+Every run of `setup.sh` also limits how much RAM Ollama spends caching prompts (`LLAMA_ARG_*` in `.env`; by default it could use about 8 GB, enough to push a 16 GB Mac into swap). This doesn't shorten the model's context. On macOS it adds a login item that keeps the limit after a restart. When setup says so, quit and reopen the Ollama app once.
+
 **Read the terminal output before closing it:** the script prints the exact values to enter in Android Studio's model provider settings and the paths and environment values for registering the Xcode agent. Finish the IDE steps below after setup.
 
 For Web UI only, run `./scripts/setup.sh` instead.

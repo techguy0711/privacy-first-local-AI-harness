@@ -15,6 +15,25 @@ def loopback_url(value):
     return value.rstrip('/')
 
 
+def model_context(mode):
+    """num_ctx from Modelfile.<mode>: the one place the context size is set."""
+    for line in (ROOT / f'Modelfile.{mode}').read_text().splitlines():
+        parts = line.split()
+        if parts[:2] == ['PARAMETER', 'num_ctx'] and len(parts) == 3:
+            return int(parts[2])
+    raise ValueError(f'Modelfile.{mode} must set PARAMETER num_ctx')
+
+
+def optional_int(env, name, default, minimum):
+    """An integer setting where '' means "leave the tool's own default"."""
+    value = env.get(name, default)
+    if value == '':
+        return ''
+    if not value.lstrip('-').isdigit() or int(value) < minimum:
+        raise ValueError(f'{name} must be an integer >= {minimum}, or empty')
+    return str(int(value))
+
+
 def positive(env, name, default):
     value = int(env.get(name, default))
     if value < 1:
@@ -41,6 +60,9 @@ class Settings:
     max_jobs: int
     max_body: int
     max_result: int
+    context: int
+    ctx_checkpoints: str
+    cache_ram: str
 
     @classmethod
     def read(cls, env=None):
@@ -68,13 +90,17 @@ class Settings:
                    positive(e, 'QUEUE_PER_USER', 2), positive(e, 'QUEUE_WAIT_SECONDS', 300),
                    positive(e, 'INFERENCE_TIMEOUT_SECONDS', 600), positive(e, 'QUEUE_RETENTION_SECONDS', 300),
                    positive(e, 'QUEUE_MAX_JOBS', 128), positive(e, 'QUEUE_MAX_BODY_BYTES', 1048576),
-                   positive(e, 'QUEUE_MAX_RESULT_BYTES', 4194304))
+                   positive(e, 'QUEUE_MAX_RESULT_BYTES', 4194304), model_context(mode),
+                   # llama-server's prompt-cache RAM, applied to Ollama by setup.sh.
+                   optional_int(e, 'LLAMA_ARG_CTX_CHECKPOINTS', '4', 0),
+                   optional_int(e, 'LLAMA_ARG_CACHE_RAM', '1024', -1))
 
     def shell(self):
         import shlex
         values = dict(INFERENCE_BACKEND=self.backend, CHAT_MODEL=self.model,
                       INFERENCE_BASE_URL=self.upstream, GATEWAY_BASE_URL=self.gateway,
-                      OLLAMA_BASE_URL=self.ollama,
+                      OLLAMA_BASE_URL=self.ollama, MODEL_CONTEXT=self.context,
+                      LLAMA_ARG_CTX_CHECKPOINTS=self.ctx_checkpoints, LLAMA_ARG_CACHE_RAM=self.cache_ram,
                       EDITOR_TIMEOUT_MS=(self.wait_seconds + self.run_seconds + 60) * 1000)
         return '\n'.join(f'export {k}={shlex.quote(str(v))}' for k, v in values.items())
 

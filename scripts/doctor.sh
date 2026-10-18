@@ -73,6 +73,44 @@ check_ollama() {
   fi
 }
 
+check_ollama_cache_limits() {
+  # setup.sh puts these in Ollama's environment; llama-server only sees them
+  # once Ollama has been restarted, so check the running server, not launchctl.
+  local want=() var kv current pid missing=() name="Ollama prompt-cache limits applied"
+  for var in LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM; do
+    if [[ -n "${!var}" ]]; then want+=("$var=${!var}"); fi
+  done
+  if [[ ${#want[@]} -eq 0 ]]; then
+    skip "$name" "not set in .env"
+    return
+  fi
+  name="$name (${want[*]})"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    pid="$(pgrep -f 'ollama serve' | head -1)"
+    if [[ -z "$pid" ]]; then
+      skip "$name" "no 'ollama serve' process found"
+      return
+    fi
+    current="$(ps eww -p "$pid" 2>/dev/null)"
+  elif command -v systemctl >/dev/null 2>&1; then
+    current="$(systemctl show ollama --property=Environment 2>/dev/null)"
+    current="${current#Environment=}"
+  else
+    skip "$name" "no systemd to read the ollama service's environment from"
+    return
+  fi
+  for kv in "${want[@]}"; do
+    if [[ " $current " != *" $kv "* ]]; then missing+=("$kv"); fi
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    pass "$name"
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
+    fail "$name" "Ollama is running without ${missing[*]} -- run ./scripts/setup.sh, then quit and reopen the Ollama app"
+  else
+    fail "$name" "the ollama service lacks ${missing[*]} -- ./scripts/setup.sh prints the systemctl steps"
+  fi
+}
+
 check_allowlist() {
   local listing
   listing="$(ollama list 2>/dev/null)" || { fail "All models in 'ollama list' are on the allowlist" "ollama list failed"; return; }
@@ -93,7 +131,7 @@ check_allowlist() {
 }
 
 check_model_built() {
-  local expect_ctx=16384
+  local expect_ctx="$MODEL_CONTEXT"  # num_ctx in Modelfile.$MODE
   if ! ollama show "coder-$MODE" >/dev/null 2>&1; then
     fail "coder-$MODE exists" "not found (run ./scripts/setup.sh)"
     return
@@ -143,6 +181,13 @@ except Exception:
 PYEOF
   then pass "Gateway mode/backend match .env"
   else fail "Gateway mode/backend match .env" "restart stack after configuration changes"; fi
+  # "localhost" can mean ::1 first; Android Studio retries only there after a
+  # timed-out request, so the gateway must answer on it too.
+  if curl -fsS --max-time 3 -g "http://[::1]:${GATEWAY_PORT:-8787}/health" >/dev/null 2>&1; then
+    pass "Gateway answers on [::1] (IPv6 loopback)"
+  else
+    fail "Gateway answers on [::1] (IPv6 loopback)" "restart the stack: ./scripts/stack.sh down && ./scripts/stack.sh up"
+  fi
 }
 
 check_openwebui() {
@@ -191,23 +236,30 @@ check_localhost_binding() {
   local ports=(11434 "$WEBUI_PORT" "${GATEWAY_PORT:-8787}")
   [[ -n "${BRAVE_API_KEY:-}" ]] && ports+=("$BRAVE_MCP_PORT")
 
-  local bad=() port listen_lines
+  # Every listening address must be loopback: 127.0.0.1, or [::1] (the
+  # gateway listens on both). Anything else -- *, 0.0.0.0, [::] or a LAN IP --
+  # is reachable from the network.
+  local bad=() port addr
   for port in "${ports[@]}"; do
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-      listen_lines="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
-    else
-      listen_lines="$(ss -tlnp 2>/dev/null | awk -v p=":$port" '$4 ~ p')"
-    fi
-    [[ -z "$listen_lines" ]] && continue
-    if grep -Eq '(^|[^0-9.])(0\.0\.0\.0|\*|::):'"$port"'([^0-9]|$)' <<<"$listen_lines"; then
-      bad+=("$port")
-    fi
+    while read -r addr; do
+      [[ -z "$addr" ]] && continue
+      case "${addr%:"$port"}" in
+        127.0.0.1|'[::1]') ;;
+        *) bad+=("$addr") ;;
+      esac
+    done < <(
+      if [[ "$(uname -s)" == "Darwin" ]]; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 {print $9}'
+      else
+        ss -tln 2>/dev/null | awk -v p=":$port" 'NR > 1 && $4 ~ p"$" {print $4}'
+      fi
+    )
   done
 
   if [[ ${#bad[@]} -eq 0 ]]; then
-    pass "Internal services bind to 127.0.0.1 only"
+    pass "Internal services bind to loopback only (127.0.0.1, ::1)"
   else
-    fail "Internal services bind to 127.0.0.1 only" "listening on all interfaces: ports ${bad[*]}"
+    fail "Internal services bind to loopback only (127.0.0.1, ::1)" "also listening on: ${bad[*]}"
   fi
 }
 
@@ -358,6 +410,7 @@ check_mac_analytics() {
 }
 
 check_ollama
+check_ollama_cache_limits
 check_allowlist
 check_model_built
 check_gateway
