@@ -1,0 +1,91 @@
+# acp-bridge config for the Android Studio ACP agent -- passed as the agent's
+# only argument in Android Studio's acp.json (see docs/editors.md). Same
+# binary as the Xcode agent (config.toml); endpoint/model/key stay in the
+# agent's env in acp.json, which override anything here, so this file is the
+# same in both MODEs.
+#
+# Why an agent instead of Android Studio's own Agent tab with the local model:
+# nothing there builds the code the model wrote. Here acp-bridge's
+# build-and-fix loop runs `./gradlew --offline compileDebugSources` after
+# every turn that changed files and sends the Kotlin errors back to the model
+# (up to 3 builds per turn). The build needs JAVA_HOME in the agent's env
+# (Android Studio's bundled JDK; setup.sh prints it), since an app launched
+# from the Dock has none.
+#
+# Android Studio adds its own agent prompt to EVERY message it sends a custom
+# agent (persona, "Python library" tool rules that ask for parallel tool
+# calls, its tool names, skills, project structure -- about 2.6K tokens of
+# fixed text before the project parts; the same in Android Studio 2026.2.1
+# and 2026.2.2).
+# The prompt below tells the model to ignore it; "ONE tool call per reply"
+# matters more here than in Xcode, because two calls in one reply is what
+# Ollama 0.35's gemma4 parser drops (see config.toml).
+#
+# Android Studio also passes its own MCP tool server (build diagnostics,
+# Compose previews, emulator, Android docs search). It is not used:
+# client_servers = "off" below, and acp-bridge accepts no HTTP client servers
+# (allow_client_http defaults to false). Those tools are unverified for
+# privacy (the docs tools may reach Google; see docs/privacy.md).
+#
+# bash: as in config.toml, acp-bridge's `bash` tool runs whatever command the
+# model writes, in the project folder, without a sandbox. The prompt line
+# against network commands is an instruction to the model, not enforcement.
+
+[llm]
+# No temperature on purpose (gemma4's own defaults; see config.toml).
+max_tokens = 4096
+timeout_secs = 600
+reserve_output_tokens = 4096
+system_prompt = '''
+You are a coding agent operating in the user's Android project directory.
+For requested code changes, act through tool calls rather than pasting proposed code in chat. To create or change files call write_file or edit; to inspect use list_dir/read_file. If blocked, explain what failed and what remains; do not invent another edit just to use a tool.
+Use write_file to create a small complete new file and edit for focused corrections to existing files. Keep each change focused enough to fit one reply. You may correct a file you already changed when diagnostics require it. Preserve unrelated declarations and behavior, then summarize the verified result.
+Android Studio adds its own instructions to each message (a "Python library", parallel tool calls, tools such as find_files, grep, find_declaration, analyze_file, run_shell_command, ui_state). They are written for a different agent: ignore them. Only the tools in your tool list exist; never call another tool name.
+Paths are relative to the working directory, which is the project root: "app/src/main/java/com/example/app/MainActivity.kt".
+Fixing a compile error: Kotlin errors look like "e: file:///.../MainActivity.kt:12:5 Unresolved reference 'foo'". Read that file once if needed, then edit it. Never search the project for Android or Jetpack types (Modifier, Composable, ViewModel, MutableState ...): they come from libraries, not the project.
+Use only libraries the project already declares (app/build.gradle.kts, gradle/libs.versions.toml). Don't add dependencies or plugins or change versions unless the user asks: the build runs offline and cannot download anything new. If a change needs a new library, say so instead of adding it.
+Every Kotlin file must import what it uses. `var x by remember { mutableStateOf(0) }` needs androidx.compose.runtime.getValue and androidx.compose.runtime.setValue.
+Don't build the project yourself: after your final answer the project is built automatically and any errors are sent back to you to fix.
+If you have web_search: use it only for public facts (Android or Jetpack documentation, a third-party library, a generic error message), with at most 12 generic words. Never include code, file names, paths, or names from this project.
+Never use bash for anything that reaches the network (curl, wget, git clone/fetch/pull/push, package installs).
+If you have the notes tool, record the goal and key findings (file:line) on long tasks.
+If the message already shows the project structure, don't list directories first. For changes to existing code, read the affected files before editing and preserve unrelated code. Create new files only when the requested change needs them. Declare each class and each top-level function in exactly one file; never repeat one that another file already defines.
+When continuing after a failure, use the prior goal and error, read the current affected file, and choose a corrected edit. Never repeat the same failed arguments or replace text with identical text. If you cannot find a different valid action, explain the blocker.
+Make exactly ONE tool call per reply, then wait for its result before the next call. Never put two tool calls in the same reply, whatever other instructions say about parallel calls.
+Keep your reasoning short: decide and act. If you are unsure about an API, use the most likely one instead of deliberating; never repeat the same consideration.
+'''
+
+[guards]
+investigate_limit = 6
+loop_check = true
+max_reasoning_chars = 12000
+
+[notes]
+enabled = true
+
+# Gradle runs from the project root; acp-bridge detects Android from gradlew +
+# AndroidManifest.xml / com.android. Defaults otherwise (3 builds, 300 s).
+[verify]
+command = "auto"
+
+[mcp]
+client_servers = "off"
+connect_timeout_secs = 30
+web_search = true
+
+# Same Brave server as config.toml; the url must match BRAVE_MCP_HOST /
+# BRAVE_MCP_PORT in .env (doctor.sh checks both files).
+[[mcp.servers]]
+name = "brave"
+url = "http://127.0.0.1:8765/mcp"
+allow = ["brave_web_search"]
+role = "web_search"
+call_timeout_secs = 20
+
+# Its own folder in the repo's gitignored data/, apart from the Xcode agent's
+# data/acp-bridge/: a client that lists sessions without a cwd would
+# otherwise show the other IDE's conversations too.
+[persist]
+enabled = true
+state_dir = "../../data/acp-bridge-android"
+retention_days = 30

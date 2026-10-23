@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 1927c56..56dd55d 100644
+index 1927c56..e47a8ff 100644
 --- a/README.md
 +++ b/README.md
 @@ -141,8 +141,22 @@ acp-bridge makes **zero outbound network calls** beyond the user-configured LLM
@@ -60,7 +60,7 @@ index 1927c56..56dd55d 100644
  | `RUST_LOG` | `acp_bridge=info` | Log level (`debug`, `info`, `warn`, `error`) |
  
  Also supports `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_API_KEY` as aliases.
-@@ -242,7 +272,258 @@ cp config.toml.example config.toml
+@@ -242,7 +272,261 @@ cp config.toml.example config.toml
  ./acp-bridge config.toml
  ```
  
@@ -127,8 +127,11 @@ index 1927c56..56dd55d 100644
 +None of these fetch dependencies, so the loop adds no network traffic. The
 +error report keeps only compiler error lines (`file:line:col: error:`,
 +`error[E…]`, `error TS…`, Kotlin `e: `, Go `file.go:line:col:`),
-+deduplicated, with cwd-relative paths, at most 40 lines / 4000 characters
-+(the last lines of output when nothing looks like an error).
++deduplicated, with cwd-relative paths, at most 40 errors / 4000 characters
++(the last lines of output when nothing looks like an error). A Kotlin
++error keeps up to 4 of the lines after it (200 characters each), where
++Kotlin puts the detail, such as the candidate signatures after "None of
++the following candidates is applicable:".
 +
 +### Recommended system prompt (Xcode)
 +
@@ -320,7 +323,7 @@ index 1927c56..56dd55d 100644
  
  ## Mac quick start (Apple Silicon)
  
-@@ -348,13 +629,35 @@ When the LLM supports function calling (Ollama with compatible models, OpenAI-co
+@@ -348,13 +632,35 @@ When the LLM supports function calling (Ollama with compatible models, OpenAI-co
  | `search_code` | Grep for patterns | Max 50 matches |
  | `write_file` | Create or overwrite a file | Max 5MB, sandboxed to working dir |
  | `edit` | Replace a unique substring in a file | Refuses ambiguous / missing matches |
@@ -358,7 +361,7 @@ index 1927c56..56dd55d 100644
  All tools are **sandboxed** to the session's working directory — the LLM cannot access files outside it.
  
  ## ACP protocol support
-@@ -368,13 +671,13 @@ the matching wire shape from the same code base.
+@@ -368,13 +674,13 @@ the matching wire shape from the same code base.
  | Method | Status |
  |--------|--------|
  | `initialize` | Supported. v1: emits `agentCapabilities` + `agentInfo`. v2: emits unified `capabilities` + `info`. Image capability opt-in via `LLM_SUPPORTS_IMAGE`. |
@@ -378,7 +381,7 @@ index 1927c56..56dd55d 100644
  | `session/delete` (v2 optional) | Graceful `-32601 not_implemented` rejection. Use `session/close` instead. |
  | `session/set_mode` | Graceful `-32602 no_modes` rejection. `session/new` does not return a `modes` array. |
  
-@@ -383,17 +686,183 @@ the matching wire shape from the same code base.
+@@ -383,17 +689,183 @@ the matching wire shape from the same code base.
  | Notification | Discriminator | Status |
  |--------------|---------------|--------|
  | Streaming text chunk | `agent_message_chunk` (v1 + v2) | Always emitted while the model is generating |
@@ -567,7 +570,7 @@ index 1927c56..56dd55d 100644
  ### Structured backend errors
  
  `acp-bridge` returns an `error.data.category` + `error.data.retryable`
-@@ -427,7 +896,8 @@ When spawned by openab, logs go to the child process's stderr. To capture them,
+@@ -427,7 +899,8 @@ When spawned by openab, logs go to the child process's stderr. To capture them,
  ## Reliability
  
  - **Retry with exponential backoff** — transient errors (408, 429, 500, 502, 503, 504) and connection timeouts are retried up to 3 times with exponential backoff (500ms, 1s, 2s)
@@ -577,7 +580,7 @@ index 1927c56..56dd55d 100644
  - **Memory-bounded sessions** — conversation history auto-trims to `LLM_MAX_HISTORY_TURNS` (default 50 turns), preventing OOM in long sessions
  - **Session limits** — configurable `LLM_MAX_SESSIONS` to cap concurrent sessions, and `LLM_SESSION_IDLE_TIMEOUT` to auto-evict idle sessions
  - **Stream buffer cap** — SSE stream buffer capped at 10MB to prevent unbounded memory growth from malicious or buggy backends
-@@ -444,7 +914,7 @@ When spawned by openab, logs go to the child process's stderr. To capture them,
+@@ -444,7 +917,7 @@ When spawned by openab, logs go to the child process's stderr. To capture them,
  ## Limitations
  
  - No authentication or authorization — intended to run behind a trusted harness (openab, Zed)
@@ -12383,10 +12386,10 @@ index bd61048..de05cd0 100644
          std::env::remove_var("LLM_WEB_ALLOWLIST");
 diff --git a/src/verify.rs b/src/verify.rs
 new file mode 100644
-index 0000000..6cd2316
+index 0000000..a712fb2
 --- /dev/null
 +++ b/src/verify.rs
-@@ -0,0 +1,981 @@
+@@ -0,0 +1,1053 @@
 +//! Verify build — the harness side of the build-and-fix loop.
 +//!
 +//! When the model finishes a turn in which a file-changing tool succeeded,
@@ -12412,6 +12415,11 @@ index 0000000..6cd2316
 +/// Error report limits (lines / characters).
 +const MAX_ERROR_LINES: usize = 40;
 +const MAX_ERROR_CHARS: usize = 4000;
++/// Lines kept after a Kotlin `e: ` line, and their length. Kotlin puts the
++/// detail there, e.g. the candidate signatures after "None of the following
++/// candidates is applicable:", whose parameter types are the fix.
++const KOTLIN_DETAIL_LINES: usize = 4;
++const KOTLIN_DETAIL_CHARS: usize = 200;
 +
 +/// Which build runs after a turn that changed files.
 +#[derive(Debug, Clone, PartialEq, Eq)]
@@ -13018,9 +13026,20 @@ index 0000000..6cd2316
 +    v
 +}
 +
++/// A line that continues the Kotlin error above it (not Gradle's own
++/// output, a warning, or the blank line that ends the error list).
++fn is_kotlin_detail(line: &str) -> bool {
++    let t = line.trim();
++    !t.is_empty()
++        && !["> ", "w: ", "i: ", "* ", "FAILURE", "BUILD "]
++            .iter()
++            .any(|p| t.starts_with(p))
++}
++
 +/// Concise error report from build output: the error lines (deduplicated,
-+/// paths relative to `cwd`), at most 40 lines / 4000 characters. Falls back
-+/// to the last lines of output when no line looks like an error.
++/// paths relative to `cwd`; a Kotlin error keeps up to 4 detail lines),
++/// at most 40 errors / 4000 characters. Falls back to the last lines of
++/// output when no line looks like an error.
 +pub fn extract_errors(output: &str, cwd: &Path) -> String {
 +    let prefixes = cwd_prefixes(cwd);
 +    let relativize = |line: &str| -> String {
@@ -13033,12 +13052,34 @@ index 0000000..6cd2316
 +    };
 +
 +    let mut seen = std::collections::HashSet::new();
-+    let mut lines: Vec<String> = output
-+        .lines()
-+        .filter(|l| is_error_line(l))
-+        .map(relativize)
-+        .filter(|l| seen.insert(l.clone()))
-+        .collect();
++    let mut lines: Vec<String> = Vec::new();
++    // Detail lines still allowed for the last kept Kotlin error.
++    let mut detail = 0;
++    for raw in output.lines() {
++        if is_error_line(raw) {
++            let line = relativize(raw);
++            let kotlin = line.starts_with("e: ");
++            if seen.insert(line.clone()) {
++                lines.push(line);
++                detail = if kotlin { KOTLIN_DETAIL_LINES } else { 0 };
++            } else {
++                detail = 0;
++            }
++        } else if detail > 0 && is_kotlin_detail(raw) {
++            detail -= 1;
++            let text = relativize(raw);
++            let mut short: String = text.chars().take(KOTLIN_DETAIL_CHARS).collect();
++            if short.len() < text.len() {
++                short.push('…');
++            }
++            if let Some(last) = lines.last_mut() {
++                last.push_str("\n  ");
++                last.push_str(&short);
++            }
++        } else {
++            detail = 0;
++        }
++    }
 +    // Build-system summaries ("the following command failed …") say
 +    // nothing the compiler errors don't; drop them when real errors exist.
 +    if lines.iter().any(|l| !is_summary_line(l)) {
@@ -13313,6 +13354,40 @@ index 0000000..6cd2316
 +        // Nothing error-shaped: the tail of the output.
 +        assert_eq!(extract_errors("step 1\n\nboom\n", cwd), "step 1\nboom");
 +        assert_eq!(extract_errors("", cwd), "(the build failed without output)");
++    }
++
++    #[test]
++    fn keeps_kotlin_error_details() {
++        let cwd = Path::new("/w/p");
++        let long = format!("fun Text(text: AnnotatedString, {})", "modifier: Modifier = ..., ".repeat(20));
++        let out = format!(
++            "> Task :app:compileDebugKotlin FAILED\n\
++             e: file:///w/p/app/src/main/java/A.kt:24:13 None of the following candidates is applicable:\n\
++             fun Text(text: String, modifier: Modifier = ...): Unit\n\
++             {long}\n\
++             e: file:///w/p/app/src/main/java/A.kt:29:83 Unresolved reference 'foo'.\n\
++             e: file:///w/p/app/src/main/java/A.kt:29:83 Unresolved reference 'foo'.\n\
++             \n\
++             FAILURE: Build failed with an exception.\n\
++             * What went wrong:\n"
++        );
++        let report = extract_errors(&out, cwd);
++        let short: String = long.chars().take(KOTLIN_DETAIL_CHARS).collect();
++        assert_eq!(
++            report,
++            format!(
++                "e: app/src/main/java/A.kt:24:13 None of the following candidates is applicable:\n  \
++                 fun Text(text: String, modifier: Modifier = ...): Unit\n  \
++                 {short}…\n\
++                 e: app/src/main/java/A.kt:29:83 Unresolved reference 'foo'."
++            )
++        );
++        // At most KOTLIN_DETAIL_LINES, and never for other toolchains.
++        let many: String = (0..10).map(|i| format!("fun f{i}()\n")).collect();
++        let report = extract_errors(&format!("e: /w/p/A.kt:1:1 Ambiguity:\n{many}"), cwd);
++        assert_eq!(report.lines().count(), 1 + KOTLIN_DETAIL_LINES);
++        let swift = "/w/p/a.swift:1:1: error: boom\n    let x = 1\n          ^\n";
++        assert_eq!(extract_errors(swift, cwd), "a.swift:1:1: error: boom");
 +    }
 +
 +    #[test]

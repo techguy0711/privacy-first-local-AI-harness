@@ -471,6 +471,42 @@ Web search needs the local Brave server: set BRAVE_API_KEY in .env and run
 Saved agent conversations: $REPO_ROOT/data/acp-bridge/
 See docs/editors.md for details.
 EOF
+
+    # Android Studio agent: the same binary with editors/acp/config.android.toml,
+    # for its Gradle build-and-fix loop. Needs Android Studio 2026.2.2 (Rabbit
+    # 2) or later. Nothing is written to Android Studio's settings; the JSON
+    # goes into its Agents page. JAVA_HOME: an app started from the Dock has
+    # none, and the bundled JDK is the one Android Studio's Gradle uses.
+    ACP_JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+    [[ -x "$ACP_JAVA_HOME/bin/java" ]] || ACP_JAVA_HOME="<Android Studio.app>/Contents/jbr/Contents/Home"
+    ACP_API_KEY_JSON=""
+    [[ "$MODE" == "server" ]] && ACP_API_KEY_JSON=$',\n        "LLM_API_KEY": "your personal Open WebUI API key (sk-...)"'
+    cat <<EOF
+
+Android Studio agent (preview, Android Studio 2026.2.2 Rabbit 2 or later): same
+acp-bridge, which builds with Gradle after each change and sends the compiler
+errors back to the model.
+  1. Settings > Tools > AI > Agents > Add via JSON..., paste:
+{
+  "agent_servers": {
+    "$ACP_AGENT_NAME agent": {
+      "command": "$ACP_BIN",
+      "args": ["$REPO_ROOT/editors/acp/config.android.toml"],
+      "env": {
+        "LLM_BASE_URL": "$ACP_LLM_BASE_URL",
+        "LLM_MODEL": "$ACP_LLM_MODEL",
+        "LLM_MODEL_CONTEXT": "$MODEL_CONTEXT",
+        "LLM_QUEUE": "1",
+        "LLM_TIMEOUT": "$((EDITOR_TIMEOUT_MS / 1000))",
+        "JAVA_HOME": "$ACP_JAVA_HOME"$ACP_API_KEY_JSON
+      }
+    }
+  }
+}
+  2. Pick "$ACP_AGENT_NAME agent" in the agent window. Don't install agents from
+     the registry list there: they are downloaded and talk to their own clouds.
+Privacy notes and what is still unverified: docs/editors.md (Android Studio agent).
+EOF
   fi
 fi
 

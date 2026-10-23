@@ -216,20 +216,23 @@ check_brave() {
 }
 
 check_acp_web_search_url() {
-  # editors/acp/config.toml can't read .env, so the Xcode agent's Brave URL is a
+  # The acp-bridge configs can't read .env, so the agents' Brave URL is a
   # literal there -- it must point at the server stack.sh starts.
-  local cfg="$REPO_ROOT/editors/acp/config.toml" want="http://$BRAVE_MCP_HOST:$BRAVE_MCP_PORT/mcp" got
+  local want="http://$BRAVE_MCP_HOST:$BRAVE_MCP_PORT/mcp" got file label
   if [[ "$(uname -s)" != "Darwin" ]]; then
-    skip "Xcode agent's web search URL matches .env" "not macOS (no Xcode agent here)"
+    skip "ACP agents' web search URL matches .env" "not macOS (no acp-bridge here)"
     return
   fi
-  got="$(awk '/^\[\[mcp\.servers\]\]/ {s = 1; next} /^\[/ {s = 0} s && /^[[:space:]]*url[[:space:]]*=/' "$cfg" 2>/dev/null \
-    | sed -E 's/^[^"]*"([^"]*)".*/\1/')"
-  if [[ "$got" == "$want" ]]; then
-    pass "Xcode agent's web search URL matches .env ($want)"
-  else
-    fail "Xcode agent's web search URL matches .env ($want)" "editors/acp/config.toml has: ${got:-<none>}"
-  fi
+  for file in config.toml config.android.toml; do
+    [[ "$file" == config.toml ]] && label="Xcode" || label="Android Studio"
+    got="$(awk '/^\[\[mcp\.servers\]\]/ {s = 1; next} /^\[/ {s = 0} s && /^[[:space:]]*url[[:space:]]*=/' "$REPO_ROOT/editors/acp/$file" 2>/dev/null \
+      | sed -E 's/^[^"]*"([^"]*)".*/\1/')"
+    if [[ "$got" == "$want" ]]; then
+      pass "$label agent's web search URL matches .env ($want)"
+    else
+      fail "$label agent's web search URL matches .env ($want)" "editors/acp/$file has: ${got:-<none>}"
+    fi
+  done
 }
 
 check_localhost_binding() {
@@ -376,22 +379,26 @@ check_acp_config() {
   # web search or persistence settings) when its config doesn't parse, and only
   # says so on stderr. Load it with the installed binary: persistence and MCP
   # off, a dead model URL and no stdin, so nothing is contacted or written.
-  if [[ "$(uname -s)" != "Darwin" ]]; then
-    skip "Xcode agent config loads (editors/acp/config.toml)" "not macOS"
-    return
-  fi
-  if [[ ! -x "$REPO_ROOT/bin/acp-bridge" ]]; then
-    skip "Xcode agent config loads (editors/acp/config.toml)" "acp-bridge not installed"
-    return
-  fi
-  local out
-  out="$(env -i PATH="/usr/bin:/bin" HOME="$HOME" RUST_LOG=acp_bridge=info LLM_PERSIST=0 LLM_MCP=off \
-    LLM_BASE_URL=http://127.0.0.1:9/v1 "$REPO_ROOT/bin/acp-bridge" "$REPO_ROOT/editors/acp/config.toml" </dev/null 2>&1)"
-  if grep -q 'Loaded config file' <<<"$out" && ! grep -q 'Failed to parse config file' <<<"$out"; then
-    pass "Xcode agent config loads (editors/acp/config.toml)"
-  else
-    fail "Xcode agent config loads (editors/acp/config.toml)" "$(grep -m1 -o 'Failed to parse config file.*' <<<"$out" | sed 's/\x1b\[[0-9;]*m//g' || echo 'no "Loaded config file" line from bin/acp-bridge')"
-  fi
+  local out file label name
+  for file in config.toml config.android.toml; do
+    [[ "$file" == config.toml ]] && label="Xcode" || label="Android Studio"
+    name="$label agent config loads (editors/acp/$file)"
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+      skip "$name" "not macOS"
+      continue
+    fi
+    if [[ ! -x "$REPO_ROOT/bin/acp-bridge" ]]; then
+      skip "$name" "acp-bridge not installed"
+      continue
+    fi
+    out="$(env -i PATH="/usr/bin:/bin" HOME="$HOME" RUST_LOG=acp_bridge=info LLM_PERSIST=0 LLM_MCP=off \
+      LLM_BASE_URL=http://127.0.0.1:9/v1 "$REPO_ROOT/bin/acp-bridge" "$REPO_ROOT/editors/acp/$file" </dev/null 2>&1)"
+    if grep -q 'Loaded config file' <<<"$out" && ! grep -q 'Failed to parse config file' <<<"$out"; then
+      pass "$name"
+    else
+      fail "$name" "$(grep -m1 -o 'Failed to parse config file.*' <<<"$out" | sed 's/\x1b\[[0-9;]*m//g' || echo 'no "Loaded config file" line from bin/acp-bridge')"
+    fi
+  done
 }
 
 check_mac_analytics() {

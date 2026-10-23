@@ -43,7 +43,7 @@ This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-t
 
 Every run of `setup.sh` also limits how much RAM Ollama spends caching prompts (`LLAMA_ARG_*` in `.env`; by default it could use about 8 GB, enough to push a 16 GB Mac into swap). This doesn't shorten the model's context. On macOS it adds a login item that keeps the limit after a restart. When setup says so, quit and reopen the Ollama app once.
 
-**Read the terminal output before closing it:** the script prints the exact values to enter in Android Studio's model provider settings and the paths and environment values for registering the Xcode agent. Finish the IDE steps below after setup.
+**Read the terminal output before closing it:** the script prints the exact values to enter in Android Studio's model provider settings, the JSON for the optional Android Studio agent, and the paths and environment values for registering the Xcode agent. Finish the IDE steps below after setup.
 
 For Web UI only, run `./scripts/setup.sh` instead.
 
@@ -72,6 +72,7 @@ After running `./scripts/setup.sh --editors`:
 |---|---|
 | **VS Code** | Install the Continue extension. Turn off **Allow Anonymous Telemetry** in Continue and **Continue: Telemetry Enabled** in VS Code settings. |
 | **Android Studio** | Open **Settings → Tools → AI → Model Providers**, add the **Local Provider** (port `8787`) or, on a server, the **Third-Party Remote Provider** printed by setup, click **Refresh**, enable the model, and pick it in the **Agent** tab on the right sidebar. The gateway removes its built-in web search (Gemini), so use Open WebUI for current information (see the IDE guide). The Continue JetBrains plugin is deprecated and can no longer be installed. |
+| **Android Studio agent** (preview, macOS, Android Studio 2026.2.2 Rabbit 2 or later) | Optional, in place of the Agent tab: it builds with Gradle after each change and fixes compile errors. Paste the JSON printed by setup under **Settings → Tools → AI → Agents → Add via JSON…**. |
 | **Xcode agent** | Open **Settings → Intelligence → Agents → Add an Agent**. Enter the executable, arguments, and environment values printed by setup, and leave **Interpreter** empty. |
 
 See [the IDE guide](docs/editors.md) for full instructions and Xcode's plain-chat option. The Xcode agent edits files, builds through Xcode and fixes the errors, searches Apple's documentation on your Mac, and can use Brave search (guarded) while the stack is up. Xcode asks "Allow acp-bridge to access Xcode?" once per launch and after each rebuild — allow it.
