@@ -114,6 +114,15 @@ class Queue:
                 j.task.cancel()
             self.finish(j, 'cancelled', 'Request cancelled', 409)
 
+    def forget(self, j):
+        """End a standard request once its response is sent. Only a request
+        with an Idempotency-Key can fetch its result again, so the rest free
+        their QUEUE_MAX_JOBS slot at once: Open WebUI embeds a document one
+        chunk per request, and retained results filled the queue for all."""
+        self.cancel(j)
+        if not j.key:
+            self.jobs.pop(j.id, None)
+
     def order(self):
         queues = OrderedDict((u, deque(i for i in ids if i in self.jobs and self.jobs[i].state == 'queued'))
                              for u, ids in self.users.items())
@@ -235,7 +244,9 @@ class Queue:
             self.finish(j, 'cancelled', 'Request cancelled', 409)
         except TimeoutError:
             self.finish(j, 'failed', 'Inference time limit reached', 504)
-        except (httpx.HTTPError, ValueError):
+        except Exception:
+            # Every job must end: an unexpected error (e.g. a non-object
+            # stream chunk) used to leave it 'running', holding a per-user slot.
             self.finish(j, 'failed', 'Inference failed or response limit exceeded; request was not replayed', 502)
         finally:
             self.running.discard(j.id)
@@ -273,17 +284,22 @@ def create_app(cfg=None, transport=None):
 
     async def user(request):
         token = request.headers.get('authorization', '')
-        if hmac.compare_digest(token, 'Bearer ' + cfg.service_key):
+        # Bytes: compare_digest raises TypeError (a 500) on non-ASCII str.
+        if hmac.compare_digest(token.encode(), ('Bearer ' + cfg.service_key).encode()):
             return request.headers.get('x-openwebui-user-id') or 'webui-service'
         if cfg.mode == 'local':
             return 'local'
-        if not token.startswith('Bearer ') or len(token) > 4096:
+        if not token.startswith('Bearer ') or len(token) > 4096 or not token.isascii():
             raise HTTPException(401, 'A personal Open WebUI API key is required')
         try:
             # Never share WebUI session cookies between users or with inference.
+            # The signed-in user's own record; since Open WebUI 0.12 /api/v1/auths/
+            # answers browser sessions only, not API keys.
             async with httpx.AsyncClient(timeout=5, trust_env=False, transport=transport) as auth_client:
-                response = await auth_client.get(cfg.webui + '/api/v1/auths/',
+                response = await auth_client.get(cfg.webui + '/api/v1/users/user/status',
                                                  headers={'Authorization': token})
+            if response.status_code == 403:
+                raise HTTPException(403, 'Open WebUI does not allow API keys for this account')
             if response.status_code != 200:
                 raise HTTPException(401, 'Invalid API key')
             identity = response.json()
@@ -410,7 +426,7 @@ def create_app(cfg=None, transport=None):
                         await asyncio.sleep(1)
                 finally:
                     # Standard streams cannot safely replay partially consumed tool calls.
-                    q.cancel(j)
+                    q.forget(j)
             return StreamingResponse(events(), media_type='text/event-stream', headers=headers)
         try:
             while j.state not in TERMINAL:
@@ -422,7 +438,7 @@ def create_app(cfg=None, transport=None):
                 return JSONResponse(j.result, headers=headers)
             return JSONResponse({'error': {'message': j.error, 'type': j.state}}, status_code=j.code, headers=headers)
         finally:
-            q.cancel(j)
+            q.forget(j)
 
     @app.post('/v1/chat/completions')
     async def chat(request: Request):

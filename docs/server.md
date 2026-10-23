@@ -73,7 +73,9 @@ When upgrading from the direct Ollama proxy configuration, remove `/ollama-embed
 4. Configure the editor with API base `https://ai.internal.example/v1` and model `coder-server:latest`.
 5. Complete the client-specific steps in the [editor guide](editors.md).
 
-The gateway validates personal keys through Open WebUI's `/api/v1/auths/` endpoint. Include that route if API-key endpoint restrictions are enabled. Pending accounts cannot submit requests.
+In server mode `stack.sh` turns on API keys for every account (`ENABLE_API_KEYS`, `USER_PERMISSIONS_FEATURES_API_KEYS`; both off by default since Open WebUI 0.12, and an Admin-panel change would not survive a restart). The gateway validates personal keys through Open WebUI's `/api/v1/users/user/status` endpoint; include that route if API-key endpoint restrictions are enabled (`ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS`, `API_KEYS_ALLOWED_ENDPOINTS`). Pending accounts cannot submit requests.
+
+Open WebUI's own chat lists `coder-server` to administrators only until an administrator grants access to the model (Settings → Admin → Models, where it is marked Private): `stack.sh` creates its entry private, as Open WebUI does for models without one. IDE access through the gateway does not depend on this.
 
 `GATEWAY_SERVICE_KEY` is an internal credential for Open WebUI. Do not distribute it to team members. Keep secrets in the gitignored `.env` files described in the editor guide.
 
@@ -101,6 +103,10 @@ For unattended operation, configure process supervision with launchd on macOS or
 ```
 
 Restart after changing `.env`. The launcher rejects configuration changes while the existing gateway is running. A restart discards queued jobs and retained results.
+
+### Upgrade Open WebUI
+
+`.env` is authoritative, so a new pin in `.env.example` reaches an existing install only when you copy it (`doctor.sh` warns while they differ). Stop the stack, back up `data/openwebui` (its database migrations can't be undone), set `OPEN_WEBUI_VERSION` in `.env`, run `./scripts/setup.sh` (it rebuilds the venv; `data/` is kept), and start the stack, which migrates the database.
 
 ### Change deployment mode
 

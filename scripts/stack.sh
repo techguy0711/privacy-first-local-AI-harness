@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# up | down | status for the inference gateway, Ollama, WebUI and Brave.
+# up | down | status for the inference gateway, Open WebUI and Brave (Ollama runs separately).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,7 +34,11 @@ source "$REPO_ROOT/scripts/runtime.sh"
 
 RUN_DIR="$REPO_ROOT/run"
 LOG_DIR="$REPO_ROOT/logs"
-mkdir -p "$RUN_DIR" "$LOG_DIR"
+# Owner-only, for everything the services write here too: Open WebUI keeps
+# every chat, upload and API key under data/.
+umask 077
+mkdir -p "$RUN_DIR" "$LOG_DIR" "$REPO_ROOT/data"
+chmod 700 "$RUN_DIR" "$LOG_DIR" "$REPO_ROOT/data"
 
 WEBUI_PID_FILE="$RUN_DIR/openwebui.pid"
 BRAVE_PID_FILE="$RUN_DIR/brave-mcp.pid"
@@ -90,6 +94,11 @@ start_openwebui() {
     export RAG_OPENAI_API_BASE_URL="$GATEWAY_BASE_URL/v1"
     export RAG_OPENAI_API_KEY="$GATEWAY_SERVICE_KEY"
     export RAG_EMBEDDING_MODEL="$EMBED_MODEL"
+    # One embedding request at a time, 32 chunks each. Open WebUI otherwise
+    # sends all of a document's chunks at once, and the gateway refuses more
+    # than QUEUE_PER_USER per account, which failed the upload.
+    export RAG_EMBEDDING_CONCURRENT_REQUESTS=1
+    export RAG_EMBEDDING_BATCH_SIZE=32
     export ENABLE_RAG_HYBRID_SEARCH=false
     export OFFLINE_MODE=true
     export HF_HUB_OFFLINE=1
@@ -99,14 +108,36 @@ start_openwebui() {
     export SCARF_NO_ANALYTICS=true
     export ANONYMIZED_TELEMETRY=false
     export ENABLE_WEB_SEARCH=false
+    # User notification webhooks POST each reply (title and full text) to a
+    # URL any user can set in their own settings: an egress path for chats.
+    export ENABLE_USER_WEBHOOKS=false
+    # Same-origin only. The default '*' also answers credentialed requests
+    # from any origin, so a page on another local port (or another internal
+    # subdomain in server mode) could read a signed-in user's chats.
+    CORS_ALLOW_ORIGIN="http://$WEBUI_HOST:$WEBUI_PORT;http://localhost:$WEBUI_PORT"
+    if [[ "$MODE" == "server" && -n "${SERVER_HOST:-}" ]]; then
+      CORS_ALLOW_ORIGIN+=";https://$SERVER_HOST"
+    fi
+    export CORS_ALLOW_ORIGIN
+    # Profile pictures are served from here, never by sending browsers on to
+    # an outside address (Gravatar, an identity provider).
+    export ENABLE_PROFILE_IMAGE_URL_FORWARDING=false
+    if [[ "$MODE" == "server" ]]; then
+      # IDEs reach the gateway with personal API keys, which the gateway checks
+      # through /api/v1/users/user/status (needs ENABLE_USER_STATUS). Keys are
+      # off by default since 0.12, and an Admin-panel change would not survive
+      # a restart with ENABLE_PERSISTENT_CONFIG=false.
+      export ENABLE_API_KEYS=true USER_PERMISSIONS_FEATURES_API_KEYS=true ENABLE_USER_STATUS=true
+    fi
     # Brave Search reaches Open WebUI as an MCP tool server: the local Brave
     # MCP server started below holds BRAVE_API_KEY, so Open WebUI never sees
     # the key. Set here on every start because ENABLE_PERSISTENT_CONFIG=false
     # drops connections added in Admin Settings at the next restart. Shape
-    # matches the Admin Settings > External Tools form in 0.6.31; users turn
-    # it on per chat.
+    # matches the Admin Settings > External Tools form in 0.12.3; the grant
+    # to user "*" lets every signed-in user turn it on per chat (a connection
+    # without grants is admin-only since 0.12).
     if [[ -n "${BRAVE_API_KEY:-}" ]]; then
-      printf -v TOOL_SERVER_CONNECTIONS '[{"type":"mcp","url":"http://%s:%s/mcp","path":"","auth_type":"none","key":"","config":{"enable":true,"access_control":null},"info":{"id":"brave","name":"Brave Search","description":"Public web search through the local Brave MCP server"}}]' \
+      printf -v TOOL_SERVER_CONNECTIONS '[{"type":"mcp","url":"http://%s:%s/mcp","path":"","auth_type":"none","key":"","config":{"enable":true,"access_grants":[{"principal_type":"user","principal_id":"*","permission":"read"}]},"info":{"id":"brave","name":"Brave Search","description":"Public web search through the local Brave MCP server"}}]' \
         "$BRAVE_MCP_HOST" "$BRAVE_MCP_PORT"
       export TOOL_SERVER_CONNECTIONS
     else
@@ -124,11 +155,12 @@ start_openwebui() {
 }
 
 # Brave Search on by default in new chats with the chat model (off again
-# without a key). 0.6.31 has no env var for this: it is the model's Tools
+# without a key). 0.12.3 has no env var for this: it is the model's Tools
 # setting (Admin Settings > Models), kept in Open WebUI's database. Open
-# WebUI's own model API is used so the schema matches the pinned version,
-# and only toolIds changes. A model with no entry yet gets a private one,
-# which is what Open WebUI does for models without one: only admins see it.
+# WebUI's own (async) model API is used so the schema matches the pinned
+# version, and only toolIds changes. A model with no entry yet gets a private
+# one (no access grants), which is what Open WebUI does for models without
+# one: only admins see it.
 # Importing Open WebUI empties STATIC_DIR and refills it from the frontend
 # build, so it gets a scratch STATIC_DIR (the running server's stays intact)
 # and FROM_INIT_PY=true, which `open-webui serve` sets to find that build.
@@ -143,27 +175,32 @@ set_default_tools() {
     WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" OFFLINE_MODE=true HF_HUB_OFFLINE=1 \
     CHAT_MODEL="$CHAT_MODEL" BRAVE_ON="$([[ -n "${BRAVE_API_KEY:-}" ]] && echo 1 || echo 0)" \
     "$REPO_ROOT/.venv/openwebui/bin/python" - >> "$LOG_DIR/openwebui.log" 2>&1 <<'PYEOF' || ok=false
-import os
+import asyncio, os
 from open_webui.models.models import ModelForm, ModelMeta, ModelParams, Models
 from open_webui.models.users import Users
 
-model_id, tool, want = os.environ['CHAT_MODEL'], 'server:mcp:brave', os.environ['BRAVE_ON'] == '1'
-model = Models.get_model_by_id(model_id)
-if model is None:
-    if want:
-        admin = Users.get_super_admin_user()
-        private = {'read': {'group_ids': [], 'user_ids': []}, 'write': {'group_ids': [], 'user_ids': []}}
-        form = ModelForm(id=model_id, name=model_id, meta=ModelMeta(toolIds=[tool]), params=ModelParams(),
-                         access_control=private)
-        if Models.insert_new_model(form, admin.id if admin else '') is None:
-            raise SystemExit(1)
-else:
-    meta = model.meta.model_dump()
-    tool_ids = list(meta.get('toolIds') or [])
-    if want != (tool in tool_ids):
-        meta['toolIds'] = tool_ids + [tool] if want else [t for t in tool_ids if t != tool]
-        if Models.update_model_by_id(model_id, ModelForm(**{**model.model_dump(), 'meta': meta})) is None:
-            raise SystemExit(1)
+
+async def main():
+    model_id, tool, want = os.environ['CHAT_MODEL'], 'server:mcp:brave', os.environ['BRAVE_ON'] == '1'
+    model = await Models.get_model_by_id(model_id)
+    if model is None:
+        if want:
+            admin = await Users.get_super_admin_user()
+            form = ModelForm(id=model_id, name=model_id, meta=ModelMeta(toolIds=[tool]), params=ModelParams(),
+                             access_grants=[])
+            if await Models.insert_new_model(form, admin.id if admin else '') is None:
+                raise SystemExit(1)
+    else:
+        meta = model.meta.model_dump()
+        tool_ids = list(meta.get('toolIds') or [])
+        if want != (tool in tool_ids):
+            meta['toolIds'] = tool_ids + [tool] if want else [t for t in tool_ids if t != tool]
+            # Without access_grants the update leaves the model's sharing as it is.
+            form = ModelForm(**{**model.model_dump(exclude={'access_grants'}), 'meta': meta})
+            if await Models.update_model_by_id(model_id, form) is None:
+                raise SystemExit(1)
+
+asyncio.run(main())
 PYEOF
   rm -rf "$static_tmp"
   if ! $ok; then

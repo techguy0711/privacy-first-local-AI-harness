@@ -65,8 +65,17 @@ check_ollama() {
     return
   fi
 
-  local server_json="$HOME/.ollama/server.json"
-  if [[ -f "$server_json" ]] && grep -Eq '"disable_ollama_cloud"[[:space:]]*:[[:space:]]*true' "$server_json"; then
+  local server_json="$HOME/.ollama/server.json" service_env
+  if [[ "$(uname -s)" != "Darwin" ]] && command -v systemctl >/dev/null 2>&1; then
+    # The Linux service runs as the `ollama` user and never reads this
+    # account's server.json (see setup.sh).
+    service_env="$(systemctl show ollama --property=Environment 2>/dev/null)"
+    if [[ " ${service_env#Environment=} " == *" OLLAMA_NO_CLOUD=1 "* ]]; then
+      pass "Ollama Cloud disabled (OLLAMA_NO_CLOUD=1 in the ollama service)"
+    else
+      fail "Ollama Cloud disabled" "the ollama service lacks OLLAMA_NO_CLOUD=1 -- ./scripts/setup.sh prints the systemctl steps"
+    fi
+  elif [[ -f "$server_json" ]] && grep -Eq '"disable_ollama_cloud"[[:space:]]*:[[:space:]]*true' "$server_json"; then
     pass "Ollama Cloud disabled"
   else
     fail "Ollama Cloud disabled" "disable_ollama_cloud:true not found in $server_json (run ./scripts/setup.sh)"
@@ -127,6 +136,37 @@ check_allowlist() {
     pass "All models in 'ollama list' are on the allowlist"
   else
     fail "All models in 'ollama list' are on the allowlist" "not allowed: ${violations[*]}"
+  fi
+}
+
+check_webui_ocr_models() {
+  # rapidocr, an open-webui dependency, bundles Baidu's PaddleOCR models;
+  # setup.sh installs Open WebUI without it (hard rule 1).
+  local python="$REPO_ROOT/.venv/openwebui/bin/python" found name="No Chinese-origin OCR models in Open WebUI's venv (rapidocr)"
+  if [[ ! -x "$python" ]]; then
+    skip "$name" "Open WebUI not installed"
+    return
+  fi
+  found="$("$python" -c 'import importlib.util as u; print(" ".join(n for n in ("rapidocr", "rapidocr_onnxruntime") if u.find_spec(n)))' 2>/dev/null)"
+  if [[ -z "$found" ]]; then
+    pass "$name"
+  else
+    fail "$name" "installed: $found -- rebuild the venv: rm -rf .venv/openwebui && ./scripts/setup.sh"
+  fi
+}
+
+check_pins_match_example() {
+  # stack.sh and the gateway are verified against the pins in .env.example;
+  # .env is authoritative, so one copied earlier keeps the old versions.
+  local var want drift=()
+  for var in OPEN_WEBUI_VERSION BRAVE_MCP_VERSION ACP_BRIDGE_VERSION ACP_BRIDGE_COMMIT; do
+    want="$(sed -n "s/^$var=\([^[:space:]#]*\).*/\1/p" "$REPO_ROOT/.env.example" | head -1)"
+    if [[ -n "$want" && "${!var:-}" != "$want" ]]; then drift+=("$var=${!var:-<unset>} (.env.example: $want)"); fi
+  done
+  if [[ ${#drift[@]} -eq 0 ]]; then
+    pass "Version pins in .env match .env.example"
+  else
+    warn "Version pins in .env match .env.example" "${drift[*]} -- copy them into .env, then run ./scripts/setup.sh"
   fi
 }
 
@@ -278,6 +318,8 @@ check_privacy_env() {
     'SCARF_NO_ANALYTICS=true'
     'ANONYMIZED_TELEMETRY=false'
     'ENABLE_WEB_SEARCH=false'
+    'ENABLE_USER_WEBHOOKS=false'
+    'ENABLE_PROFILE_IMAGE_URL_FORWARDING=false'
   )
   local missing=() kv
   for kv in "${required[@]}"; do
@@ -329,6 +371,26 @@ check_env_not_tracked() {
     fail ".env is not tracked by git" ".env IS tracked -- remove it: git rm --cached .env"
   else
     pass ".env is not tracked by git"
+  fi
+}
+
+check_private_files() {
+  # .env and .continue/.env hold keys; data/ holds every chat, upload and API
+  # key (webui.db). setup.sh and stack.sh make them owner-only.
+  local bad=() path mode name="Secrets and data are owner-only (.env, .continue/.env, data/, logs/, run/)"
+  for path in .env .continue/.env data logs run; do
+    [[ -e "$REPO_ROOT/$path" ]] || continue
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      mode="$(stat -f '%Lp' "$REPO_ROOT/$path")"
+    else
+      mode="$(stat -c '%a' "$REPO_ROOT/$path")"
+    fi
+    [[ "$mode" == *00 ]] || bad+=("$path")
+  done
+  if [[ ${#bad[@]} -eq 0 ]]; then
+    pass "$name"
+  else
+    fail "$name" "other accounts can read: ${bad[*]} -- fix: chmod go= ${bad[*]}"
   fi
 }
 
@@ -419,6 +481,8 @@ check_mac_analytics() {
 check_ollama
 check_ollama_cache_limits
 check_allowlist
+check_webui_ocr_models
+check_pins_match_example
 check_model_built
 check_gateway
 check_chat_completion
@@ -429,6 +493,7 @@ check_localhost_binding
 check_privacy_env
 check_continue_web_tools_off
 check_env_not_tracked
+check_private_files
 check_acp_bridge
 check_acp_config
 check_mac_analytics

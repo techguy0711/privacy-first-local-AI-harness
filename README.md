@@ -131,7 +131,7 @@ Run `./scripts/setup.sh` to apply setup again. To refresh IDE configuration, run
 ./scripts/setup.sh --editors
 ```
 
-The editor option rewrites the Continue configuration and secrets file only when they changed (backing up the old copies), and rebuilds the Xcode agent only when its pinned version, commit, or patch changed, or `bin/acp-bridge` was replaced (Xcode then asks to allow it again). Each run also checks Ollama's registry for newer versions of the pulled model tags; nothing is downloaded while they are unchanged. Review the terminal output for any remaining manual steps, especially Xcode registration. If you move this project folder, update Xcode's executable and arguments paths.
+The editor option rewrites the Continue configuration and secrets file only when they changed (backing up the old copies), and rebuilds the Xcode agent only when its pinned version, commit, or patch changed, or `bin/acp-bridge` was replaced (Xcode then asks to allow it again). Setup pulls a model only when it isn't installed and never re-checks Ollama's registry, so models change only when you pull one yourself; after `ollama pull gemma4:12b`, rebuild `coder-local` on it with `ollama create coder-local -f Modelfile.local`. When `OPEN_WEBUI_VERSION` in `.env` changes, setup rebuilds Open WebUI's venv and keeps `data/`; see [upgrading Open WebUI](docs/server.md#upgrade-open-webui). Review the terminal output for any remaining manual steps, especially Xcode registration. If you move this project folder, update Xcode's executable and arguments paths.
 
 ## Shared server setup
 

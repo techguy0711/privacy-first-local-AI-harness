@@ -18,7 +18,7 @@ Covers Continue (VS Code), Android Studio's built-in model providers, and Xcode'
 - Continue's own settings page (gear icon in the Continue panel) → toggle "Allow Anonymous Telemetry" off.
 - VS Code additionally has its own override: Settings → search "Continue: Telemetry Enabled" → uncheck. (This VS Code setting overrides the Continue settings-page toggle if they disagree.)
 
-**Autocomplete**: off by default (commented out in both `config.local.yaml` and `config.server.yaml`) to save memory on the 16GB Mac. If you enable it, uncomment the `starcoder2:3b` block only — do **not** use Continue's own documented recommendation (`qwen2.5-coder`), which is not on the model allowlist.
+**Autocomplete**: off. The gateway serves chat and embeddings only, so the Continue configs have no autocomplete model (see the end of this guide). Don't add Continue's own documented recommendation (`qwen2.5-coder`): it isn't on the model allowlist.
 
 ## Android Studio
 
@@ -94,11 +94,11 @@ No API key, no outbound traffic — this talks to the local inference gateway. N
 
 **Server mode:**
 1. Same dialog → **Internet Hosted**.
-2. URL: `https://<SERVER_HOST from .env>` (the reverse-proxied Open WebUI TLS endpoint — see `docs/server.md`).
+2. URL: `https://<SERVER_HOST from .env>` (the private TLS proxy — see `docs/server.md`).
 3. API Key: your per-user Open WebUI API key (`sk-...`, from Open WebUI → Settings → Account → API Keys).
 4. Add, then pick `coder-server` the same way as above.
 
-Open WebUI's own OpenAI-compatible endpoint lives at `/api/chat/completions`, not `/v1/chat/completions`. `docs/server.md`'s reverse-proxy config includes a rewrite from `/v1/chat/completions` to `/api/chat/completions` specifically so this flow works unmodified — if a future Xcode version expects a different path, add the matching rewrite there rather than changing Open WebUI.
+The proxy sends `/v1/*` to the inference gateway, which answers `/v1/models` and `/v1/chat/completions` and checks the personal key; nothing is rewritten to Open WebUI's own `/api/chat/completions` any more. If a future Xcode version calls a different path, route that path to the gateway in the proxy config.
 
 ### Agent (ACP, via acp-bridge — tools, Xcode's own tools, guarded web search)
 

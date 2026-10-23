@@ -51,6 +51,8 @@ Android Studio Rabbit 2 | 2026.2.2 runs an external ACP agent ("Bring Your Own A
 
 ### Open WebUI privacy/telemetry (set by `stack.sh`, all confirmed current)
 
+Re-checked against the 0.12.3 source and a live staging run on 2026-10-23: every variable below still exists under the same name and does the same thing (see "Open WebUI 0.12.3 upgrade" below).
+
 | Var | Value we set | Effect |
 |---|---|---|
 | `OFFLINE_MODE` | `true` | disables update checks + automatic model/asset downloads |
@@ -61,14 +63,19 @@ Android Studio Rabbit 2 | 2026.2.2 runs an external ACP agent ("Bring Your Own A
 | `SCARF_NO_ANALYTICS` | `true` | disables the Scarf install/runtime analytics pixel |
 | `ANONYMIZED_TELEMETRY` | `false` | disables ChromaDB's telemetry |
 | `ENABLE_WEB_SEARCH` | `false` | keeps Open WebUI's *built-in* web search off — search goes through the Brave MCP tool instead |
-| `TOOL_SERVER_CONNECTIONS` | one MCP connection to `http://$BRAVE_MCP_HOST:$BRAVE_MCP_PORT/mcp`, auth none (`[]` without `BRAVE_API_KEY`) | registers the Brave MCP server as Open WebUI's only tool server, so users don't add it by hand. The key stays in the Brave process; Open WebUI only talks to it on loopback. Verified 2026-10-16 on 0.6.31: tool `server:mcp:brave` listed, and a chat with it on ran `brave_web_search` |
-
-**Brave Search is on by default in Open WebUI chats with the chat model** (since 2026-10-16). Open WebUI has no env var for default tools, so `stack.sh up` sets the model's Tools setting (`toolIds`) in Open WebUI's database. It creates a private entry if none exists, which keeps the model visible to admins only, as before. With search on, Open WebUI first asks the model whether to search and what to search for, on every message. Unlike the Xcode agent, Open WebUI has no code-level check on that query, so hard rule 3 (no source code in searches) rests on `prompts/system.md` alone. For chats about private code, switch Brave Search off in that chat (the wrench icon in the message box).
-| `RAG_EMBEDDING_ENGINE` | `ollama` | use local Ollama for embeddings |
+| `TOOL_SERVER_CONNECTIONS` | one MCP connection to `http://$BRAVE_MCP_HOST:$BRAVE_MCP_PORT/mcp`, auth none (`[]` without `BRAVE_API_KEY`) | registers the Brave MCP server as Open WebUI's only tool server, so users don't add it by hand. The key stays in the Brave process; Open WebUI only talks to it on loopback. The entry grants read access to user `*` (`config.access_grants`): since 0.12 a connection without grants is admin-only, and the old `access_control: null` migrates to no grants. Verified 2026-10-23 on 0.12.3: a regular account lists `server:mcp:brave`, and a chat in the UI ran `brave_web_search` and answered with a cited source |
+| `ENABLE_USER_WEBHOOKS` | `false` | since 2026-10-23, also 0.12.3's default (`true` in 0.6.31, where any user could set a notification webhook URL and Open WebUI POSTed each reply's title and full text there). 0.12.3 checks it when sending, not only in the UI (`utils/notifications.py`), and offers the model its `notify` tool only while it is on |
+| `CORS_ALLOW_ORIGIN` | Open WebUI's own origin(s): `http://$WEBUI_HOST:$WEBUI_PORT`, `http://localhost:$WEBUI_PORT`, plus `https://$SERVER_HOST` in server mode | since 2026-10-23. The default `*` answered credentialed requests from any origin (checked live: `Access-Control-Allow-Origin` echoed a foreign origin with `Allow-Credentials: true`), so a page on another local port, or another internal subdomain in server mode, could read a signed-in user's chats with their `SameSite=Lax` cookie. The UI itself is same-origin. 0.12.3's Socket.IO server checks the same list (a foreign origin gets "not an accepted origin"), so the list must hold every address people open the UI with |
+| `ENABLE_PROFILE_IMAGE_URL_FORWARDING` | `false` | since 2026-10-23 (0.12.3 default `true`): profile pictures are served by Open WebUI instead of sending browsers on to an outside address (Gravatar, an identity provider) |
+| `RAG_EMBEDDING_ENGINE` | `openai` | embeddings through the inference gateway's OpenAI-compatible `/v1/embeddings` (`RAG_OPENAI_API_BASE_URL`), which sends them to Ollama on loopback |
 | `RAG_EMBEDDING_MODEL` | `nomic-embed-text` | — |
 | `ENABLE_RAG_HYBRID_SEARCH` | `false` | stays off; no reranker configured either |
 
-**Confirmed live**: the startup log prints `Embedding model set: nomic-embed-text` and a RAG query's response includes `"embedding_config":"{'engine': 'ollama', 'model': 'nomic-embed-text'}"` — the bundled Hugging Face embedder is never loaded as long as these are set before the first launch.
+**Brave Search is on by default in Open WebUI chats with the chat model** (since 2026-10-16). Open WebUI has no env var for default tools, so `stack.sh up` sets the model's Tools setting (`toolIds`) in Open WebUI's database. It creates a private entry if none exists, which keeps the model visible to admins only, as before. With search on, Open WebUI first asks the model whether to search and what to search for, on every message. Unlike the Xcode agent, Open WebUI has no code-level check on that query, so hard rule 3 (no source code in searches) rests on `prompts/system.md` alone. For chats about private code, switch Brave Search off in that chat (the wrench icon in the message box).
+
+**Not yet closed (still so in 0.12.3, 2026-10-23)**: any signed-in user can make the Open WebUI server fetch a public URL (`#` followed by a URL in the message box, `POST /api/v1/retrieval/process/web`, and the YouTube loader). `ENABLE_WEB_SEARCH=false` doesn't gate these, and `ENABLE_LOCAL_WEB_FETCH` (default off; 0.6.31's `ENABLE_RAG_LOCAL_WEB_FETCH` is still read) only blocks private addresses. That is runtime traffic other than Brave that a user starts (the model's own `fetch_url` tool is offered only with web search on), so it rests on network egress rules rather than on this stack's settings.
+
+**Confirmed live** (2026-10-06, before embeddings moved to the gateway): the startup log prints `Embedding model set: nomic-embed-text` and a RAG query's response includes `"embedding_config":"{'engine': 'ollama', 'model': 'nomic-embed-text'}"` — the bundled Hugging Face embedder is never loaded as long as these are set before the first launch.
 
 ### Two real bugs found and fixed while testing (not just doc research)
 
@@ -76,6 +83,27 @@ Android Studio Rabbit 2 | 2026.2.2 runs an external ACP agent ("Bring Your Own A
 2. **Open WebUI's internal model id includes a `:latest` tag** that `ollama create coder-<mode>` (no explicit tag) produces, confirmed via `GET /api/models`. `DEFAULT_MODELS=coder-local` silently failed to match; it had to be `coder-local:latest`. Fixed in `stack.sh`.
 
 Both were caught by actually running the stack end-to-end, not just reading docs — a reminder that "the docs say X" and "X is what happens" aren't always the same thing here.
+
+## Open WebUI 0.12.3 upgrade (re-verified live, 2026-10-23)
+
+0.6.31 (September 2025) was replaced by 0.12.3 (16 October 2026), which fixes published advisories affecting 0.6.31, among them CVE-2026-54010 (CVSS 8.3: any signed-in user could read or delete another user's uploaded files). Don't settle on a version from 0.7.0 to 0.11.3: GHSA-vpq8-f445-hcq7 (any website could take a signed-in user's session token, CVSS 8.1) is fixed only in 0.11.4.
+
+**Method**: every setting `stack.sh` relies on was traced in the 0.12.3 source. Then a staging copy of this repo (its own `.env`, ports 3999/8797/8775, a copy of real data) ran the real `setup.sh`, `stack.sh` and `doctor.sh` on 0.12.3; the database migrated from 0.6.31's revision with users, chats and the model entry intact. Outbound traffic was recorded three ways for 18 minutes of startup, API calls, a chat, a 45-chunk document upload and a question about it, a Brave search from the UI, idle time and a restart: a Python audit hook in Open WebUI and the gateway (every socket connect, name lookup and subprocess; for this run uvloop and aiodns were off, so their connections went through Python sockets), `lsof` every 0.5 s on every process of the stack including the Node Brave server, and the browser's list of loaded resources.
+
+| Source | Outside connections | Verdict |
+|---|---|---|
+| Open WebUI and gateway (39 hook events) | none: loopback only, no outside name lookups (the other events: `uname -p` and `file -b` at startup, Python's platform detection) | clean |
+| Brave MCP server (`node`, lsof) | `registry.npmjs.org` when `npx` starts it (the launch-time check below); `api.search.brave.com` (15.197.138.111:443) during the search | as expected |
+| Browser, UI (237 requests) | none: everything from `127.0.0.1:3999`, fonts included | clean |
+
+**What 0.12.3 changed for this stack**, each handled in `stack.sh`, `setup.sh` or the gateway:
+- `GET /api/v1/auths/` answers browser sessions only ("A human session is required." for an API key), so the gateway checks personal keys with `GET /api/v1/users/user/status` (needs `ENABLE_USER_STATUS`, on by default). API keys are off by default (`ENABLE_API_KEYS`, renamed from `ENABLE_API_KEY`) and non-admins also need the `features.api_keys` permission; `stack.sh` turns both on in server mode only. Checked live: a regular account's key works through the gateway, and without the permission the gateway answers 403 "Open WebUI does not allow API keys for this account".
+- A tool server without access grants is admin-only, hence the grant in `TOOL_SERVER_CONNECTIONS`.
+- Open WebUI embeds a document by sending all its chunks at once (`RAG_EMBEDDING_CONCURRENT_REQUESTS=0`), which the gateway's per-account limit refuses (10 simultaneous requests from one account: 8 got 429). `stack.sh` sets one request at a time, 32 chunks each; the 45-chunk document then embedded in 3 s.
+- Open WebUI's model API is async, so `stack.sh`'s default-tools step awaits it.
+- `rapidocr`, an open-webui dependency, bundles Baidu's PaddleOCR models (`PP-OCRv6_det/rec`, `ch_ppocr_cls`) and points at `modelscope.cn` for more; 0.6.31 shipped them as well (`rapidocr_onnxruntime`, PP-OCRv4). They only serve OCR of images in PDFs (`PDF_EXTRACT_IMAGES`, off), so `setup.sh` installs Open WebUI without them (hard rule 1) and `doctor.sh` checks. The only other bundled model is Silero's voice activity detector in `faster_whisper`, for speech input, which this stack doesn't use.
+
+**New in 0.12.3, checked**: the model's built-in `fetch_url` and `search_web` tools exist only with `ENABLE_WEB_SEARCH` on, and `notify` only with user webhooks on; the version check needs `ENABLE_VERSION_UPDATE_CHECK`, the license check a `LICENSE_KEY`; tool and function requirement installs are skipped under `OFFLINE_MODE`; terminals need configured terminal servers (none). `ENABLE_FORWARD_USER_INFO_HEADERS` now also sends the user's name, e-mail, role and chat ID to tool servers, with no per-server switch; the local Brave server doesn't pass them on (its code sends Brave only the query and its own key).
 
 ## Live egress audit (performed 2026-10-06, macOS, `lsof -nP -i`)
 
@@ -96,7 +124,7 @@ Exercised: chat completion, RAG (file upload → Knowledge → grounded query), 
 
 - Brave search entirely: leave `BRAVE_API_KEY` empty in `.env` — `stack.sh` skips launching the Brave MCP server and `doctor.sh` reports `disabled: no key`. For the Xcode agent alone: `LLM_WEB_SEARCH=off` in its env vars in Xcode.
 - The npm registry check on Brave MCP launch: pre-warm npm's cache once (`npm view @brave/brave-search-mcp-server@2.1.4` or just let the first `stack.sh up` do it) — subsequent launches hit the local npm cache first and only do a brief version check.
-- Ollama's registry traffic: only happens during `ollama pull` in `setup.sh`. Each run still checks every model's manifest with the registry (`pulling manifest`) and downloads nothing while the model is unchanged (confirmed: an idempotent second run fetched no layers and left the model digests as they were). If upstream moves a tag (e.g. re-publishes `gemma4:12b`), a re-run downloads the new version and rebuilds `coder-<mode>` from it.
+- Ollama's registry traffic: only happens during `ollama pull`, which `setup.sh` runs only for a model that isn't installed yet (since 2026-10-14; before that every run checked each manifest with the registry). Re-runs don't contact the registry, so a tag that moves upstream (e.g. a re-published `gemma4:12b`) changes nothing here until you pull it yourself; then rebuild the derived model on it with `ollama create coder-<mode> -f Modelfile.<mode>`.
 
 ## Localhost-only binding (local mode) — confirmed live
 

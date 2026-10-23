@@ -22,10 +22,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.cfg = Settings.read({'MODE': 'server', 'GATEWAY_SERVICE_KEY': 'test-service'})
         async def upstream(request):
             self.assertNotIn('cookie', request.headers)
-            if request.url.path == '/api/v1/auths/':
+            if request.url.path == '/api/v1/users/user/status':
                 token = request.headers.get('authorization', '')
                 if token in ('Bearer alice', 'Bearer bob'):
                     return httpx.Response(200, json={'id': token[7:], 'role': 'user'}, headers={'set-cookie': 'token=test-session; Path=/'})
+                if token == 'Bearer no-keys':  # API keys off or not permitted for the account
+                    return httpx.Response(403)
                 return httpx.Response(401)
             self.calls.append((str(request.url), json.loads(request.content)))
             if self.block:
@@ -110,6 +112,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             r = await getattr(self.client, method)('/v1/jobs/' + j, headers={'Authorization': 'Bearer bob', 'X-OpenWebUI-User-Id': 'alice'})
             self.assertEqual(r.status_code, 404)
         self.assertEqual((await self.submit(user='invalid')).status_code, 401)
+        self.assertEqual((await self.submit(user='no-keys')).status_code, 403)
         self.assertEqual((await self.client.get('/v1/models', headers={'Authorization': 'Bearer invalid'})).status_code, 401)
         model = (await self.client.get('/v1/models')).json()['data'][0]
         self.assertEqual((model['id'], model['context_length']), ('coder-server:latest', 16384))
@@ -220,6 +223,38 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         jid = r.json()['id']
         self.assertEqual((await self.client.get('/v1/jobs/' + jid)).status_code, 404)
         self.assertEqual((await self.client.get('/v1/jobs/' + jid, headers={'Authorization': 'Bearer bob'})).status_code, 200)
+
+    async def test_delivered_requests_free_job_slots(self):
+        # Open WebUI embeds a document one chunk per request; delivered
+        # results must not fill QUEUE_MAX_JOBS for every other user.
+        q = self.app.state.queue
+        q.cfg = replace(q.cfg, max_jobs=2)
+        for _ in range(3):
+            r = await self.client.post('/v1/embeddings', json={'model': 'nomic-embed-text', 'input': 'test'})
+            self.assertEqual(r.status_code, 200)
+        r = await self.client.post('/v1/chat/completions', json={**BODY, 'stream': True}, headers={'Authorization': 'Bearer bob'})
+        self.assertIn('data: [DONE]', r.text)
+        self.assertEqual(q.jobs, {})
+        # With an Idempotency-Key the result stays retained for a replay.
+        r = await self.client.post('/v1/chat/completions', json=BODY, headers={'Idempotency-Key': 'k'})
+        self.assertIn(r.headers['x-request-id'], q.jobs)
+
+    async def test_non_ascii_authorization_rejected(self):
+        for token in (b'Bearer \xe9', b'\xff'):
+            self.assertEqual((await self.client.get('/v1/models', headers={'Authorization': token})).status_code, 401)
+
+    async def test_unexpected_backend_data_ends_job(self):
+        async def odd(request):
+            return httpx.Response(200, text='data: 5\n\ndata: [DONE]\n\n')
+        q = self.app.state.queue
+        await q.client.aclose()
+        q.client = httpx.AsyncClient(transport=httpx.MockTransport(odd))
+        try:
+            j = q.submit('alice', {**BODY, 'stream': True}, 'chat')
+            await self.wait_for(lambda: j.state == 'failed')
+            self.assertEqual(j.code, 502)
+        finally:
+            await q.client.aclose()
 
 
 class LoopbackSocketTests(unittest.TestCase):

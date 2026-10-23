@@ -201,19 +201,23 @@ EOF
   else
     log "Ollama prompt-cache limits already applied (${OLLAMA_CACHE_ENV[*]})"
   fi
-elif [[ ${#OLLAMA_CACHE_ENV[@]} -gt 0 ]]; then
+elif [[ "$(uname -s)" != "Darwin" ]]; then
+  # The Linux service runs as the `ollama` user, whose home is not this
+  # account's, so the server.json above never reaches it: Ollama Cloud is
+  # switched off there with OLLAMA_NO_CLOUD (Ollama FAQ) in the service's env.
+  service_env=(OLLAMA_NO_CLOUD=1 ${OLLAMA_CACHE_ENV[@]+"${OLLAMA_CACHE_ENV[@]}"})
   current="$(systemctl show ollama --property=Environment 2>/dev/null || true)"
   missing=()
-  for kv in "${OLLAMA_CACHE_ENV[@]}"; do
+  for kv in "${service_env[@]}"; do
     if [[ " ${current#Environment=} " != *" $kv "* ]]; then missing+=("$kv"); fi
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
-    log "Ollama prompt-cache limits are not set for the ollama service. Add them (needs sudo):"
+    log "The ollama service lacks ${missing[*]} (Ollama Cloud off, prompt-cache limits). Add them (needs sudo):"
     echo "  sudo systemctl edit ollama.service    # then under [Service]:"
     for kv in "${missing[@]}"; do echo "    Environment=\"$kv\""; done
     echo "  sudo systemctl daemon-reload && sudo systemctl restart ollama"
   else
-    log "Ollama prompt-cache limits already applied (${OLLAMA_CACHE_ENV[*]})"
+    log "Ollama service environment already applied (${service_env[*]})"
   fi
 fi
 
@@ -264,13 +268,31 @@ if [[ -d "$VENV_DIR" ]] && ! "$VENV_DIR/bin/python" -c '' >/dev/null 2>&1; then
   log "Open WebUI venv is broken (repo moved or copied?) -- rebuilding..."
   rm -rf "$VENV_DIR"
 fi
+# Another version gets a fresh venv too: installing over the old one keeps
+# packages the new one no longer uses. data/ (chats, settings) is kept, and
+# Open WebUI migrates its database on the next start.
+INSTALLED_WEBUI="$("$VENV_DIR/bin/python" -c 'import importlib.metadata as m; print(m.version("open-webui"))' 2>/dev/null || true)"
+if [[ -n "$INSTALLED_WEBUI" && "$INSTALLED_WEBUI" != "$OPEN_WEBUI_VERSION" ]]; then
+  log "Open WebUI $INSTALLED_WEBUI -> $OPEN_WEBUI_VERSION: rebuilding the venv (data/ is kept)..."
+  rm -rf "$VENV_DIR"
+fi
 if [[ ! -d "$VENV_DIR" ]]; then
   log "Creating Open WebUI venv at .venv/openwebui (Python 3.11)..."
   uv venv --python 3.11 "$VENV_DIR"
 fi
 
-log "Installing open-webui==$OPEN_WEBUI_VERSION (no-op if already installed)..."
-uv pip install --python "$VENV_DIR/bin/python" "open-webui==$OPEN_WEBUI_VERSION"
+# rapidocr, an open-webui dependency, bundles Baidu's PaddleOCR models and
+# fetches more from modelscope.cn. It only serves OCR of images in PDFs
+# (PDF_EXTRACT_IMAGES, off), so it is never installed: hard rule 1.
+if ! uv pip install --help 2>/dev/null | grep -q -- '--excludes'; then
+  err "This uv has no --excludes option (needed to leave out rapidocr). Update it: brew upgrade uv (or: uv self update)"
+  exit 1
+fi
+UV_EXCLUDES="$(mktemp)"
+printf 'rapidocr\nrapidocr-onnxruntime\n' > "$UV_EXCLUDES"
+log "Installing open-webui==$OPEN_WEBUI_VERSION without rapidocr (no-op if already installed)..."
+uv pip install --python "$VENV_DIR/bin/python" --excludes "$UV_EXCLUDES" "open-webui==$OPEN_WEBUI_VERSION"
+rm -f "$UV_EXCLUDES"
 
 # ---------- 6. Generate WEBUI_SECRET_KEY if empty ----------
 if [[ -z "${WEBUI_SECRET_KEY:-}" ]]; then
@@ -305,7 +327,15 @@ if [[ -z "${GATEWAY_SERVICE_KEY:-}" ]]; then
 fi
 
 # ---------- 7. Data/run/log directories ----------
+# Owner-only: .env holds the keys and data/ every chat, upload and API key
+# (Open WebUI's webui.db); other accounts on this machine must not read them.
 mkdir -p "$REPO_ROOT/data/openwebui" "$REPO_ROOT/run" "$REPO_ROOT/logs"
+chmod 700 "$REPO_ROOT/data" "$REPO_ROOT/run" "$REPO_ROOT/logs"
+chmod 600 "$ENV_FILE"
+if [[ -f "$REPO_ROOT/.continue/.env" ]]; then  # --editors' copy of BRAVE_API_KEY
+  chmod 700 "$REPO_ROOT/.continue"
+  chmod 600 "$REPO_ROOT/.continue/.env"
+fi
 
 # ---------- 8. Optional: install editor configs (--editors) ----------
 if $INSTALL_EDITORS; then
@@ -364,10 +394,12 @@ if $INSTALL_EDITORS; then
 
   CONTINUE_ENV_DIR="$REPO_ROOT/.continue"
   mkdir -p "$CONTINUE_ENV_DIR"
+  chmod 700 "$CONTINUE_ENV_DIR"
   CONTINUE_ENV_FILE="$CONTINUE_ENV_DIR/.env"
   NEW_CONTINUE_ENV="$(mktemp)"
   printf 'BRAVE_API_KEY=%s\n' "${BRAVE_API_KEY:-}" > "$NEW_CONTINUE_ENV"
   replace_if_changed "$NEW_CONTINUE_ENV" "$CONTINUE_ENV_FILE" " (BRAVE_API_KEY synced from .env; gitignored)"
+  chmod 600 "$CONTINUE_ENV_FILE"  # a secret, like .env
   log "Remaining manual step: disable telemetry in the IDE (see docs/editors.md) -- it's an IDE toggle, not a config.yaml key."
 
   # Android Studio: its own model providers setting replaces the deprecated
