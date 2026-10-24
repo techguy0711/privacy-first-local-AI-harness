@@ -6,7 +6,7 @@ See [server setup and Mac testing](docs/server.md) for Ollama deployment and que
 
 ## Before you start
 
-**What you need (local mode):** a Mac with at least 16 GB of memory (tested on an Apple Silicon Mac with 16 GB) and about 15 GB of free disk: 8 GB for the model, 2 GB for Open WebUI, and 2.5 GB to build the IDE agent. The Xcode agent needs Xcode 27 (tested with 27.0 and the 27 beta).
+**What you need (local mode):** a Mac with at least 16 GB of memory (tested on an Apple Silicon Mac with 16 GB) and about 15.5 GB of free disk: 8 GB for the model, 2 GB for Open WebUI, 0.5 GB for the voice-input model, and 2.5 GB to build the IDE agent. The Xcode agent needs Xcode 27 (tested with 27.0 and the 27 beta).
 
 **Where to put the project:** clone it into a normal folder such as `~/Developer`, **not** `~/Downloads`, `~/Desktop` or `~/Documents`. macOS privacy protection covers those three, so it asks extra permission prompts and can block agents that Xcode starts:
 
@@ -39,7 +39,7 @@ If you already have a `.env`, keep it. Open `.env` and confirm `MODE=local`. Set
 ./scripts/setup.sh --editors
 ```
 
-This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-text`) and Open WebUI. On macOS it also builds the IDE agent (`acp-bridge`, which Xcode, Android Studio and VS Code run) from source, which needs Rust — see the [prerequisites](#one-time-prerequisites). Nothing is written to your editors' settings; setup prints what to enter.
+This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-text`), Open WebUI, and the Whisper small model for Open WebUI's voice input (downloaded once to `data/whisper/` and checked against pinned hashes). On macOS it also builds the IDE agent (`acp-bridge`, which Xcode, Android Studio and VS Code run) from source, which needs Rust — see the [prerequisites](#one-time-prerequisites). Nothing is written to your editors' settings; setup prints what to enter.
 
 Every run of `setup.sh` also limits how much RAM Ollama spends caching prompts (`LLAMA_ARG_*` in `.env`; by default it could use about 8 GB, enough to push a 16 GB Mac into swap). This doesn't shorten the model's context. On macOS it adds a login item that keeps the limit after a restart. When setup says so, quit and reopen the Ollama app once.
 
@@ -61,6 +61,7 @@ The command starts the inference gateway, Open WebUI and, when a Brave key is se
 
 - The inference gateway adds [prompts/system.md](prompts/system.md) and today's date to chat requests automatically.
 - **Images and files**: attach them in the message box. Screenshots and other images (PNG, JPEG or WebP, not GIF) go to the model, which reads them; documents (PDF, text, code) are read by Open WebUI on this machine and passed on as text. The gateway takes images only when they're sent inline and never fetches a link.
+- **Voice**: the microphone button (dictation) and the call button (voice mode) work with nothing to configure. Open WebUI turns your speech into text on this machine, and replies are read aloud with your browser's built-in voices. In **Settings → Audio**, keep both engines on **Default** and leave **Allow non-local voices** off: the other choices send your audio or the replies to Google, Apple or Hugging Face (see [docs/privacy.md](docs/privacy.md#voice-input-and-spoken-replies-2026-10-24)). Each recording is deleted as soon as it's transcribed (the "Delete voice recordings" function in **Admin Settings → Functions**, which `stack.sh up` installs and keeps on).
 - With `BRAVE_API_KEY` set, `stack.sh up` adds **Brave Search** to Open WebUI and turns it on by default in new `coder-local` chats; there is nothing to configure. The model decides when to search, for example for current events or the latest version of a tool. Each message then takes longer, because the model first decides whether to search. To turn search off for one chat, click the wrench icon in the message box and switch off **Brave Search**. `stack.sh up` turns it back on as the default for new chats, even if you turned it off in **Admin Settings → Models**. Open WebUI connects to the local Brave MCP server, which holds the key, so the key never enters Open WebUI. Don't add tool connections in Admin Settings: Open WebUI forgets them at restart, because `stack.sh` makes `.env` authoritative.
 
 ### 5. Connect your IDE

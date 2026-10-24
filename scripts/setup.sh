@@ -294,6 +294,29 @@ log "Installing open-webui==$OPEN_WEBUI_VERSION without rapidocr (no-op if alrea
 uv pip install --python "$VENV_DIR/bin/python" --excludes "$UV_EXCLUDES" "open-webui==$OPEN_WEBUI_VERSION"
 rm -f "$UV_EXCLUDES"
 
+# ---------- 5b. Speech-to-text model (Open WebUI voice input) ----------
+# Fetched here, once, from the pinned commit and checked file by file (pins in
+# runtime.sh). At runtime Open WebUI only reads it (HF_HUB_OFFLINE=1).
+if whisper_model_ok; then
+  log "Whisper small (voice input) already in data/whisper/"
+else
+  log "Downloading Whisper small for voice input (~485 MB, $WHISPER_REPO at ${WHISPER_REVISION:0:7})..."
+  WHISPER_TMP="$WHISPER_DIR.partial"
+  rm -rf "$WHISPER_TMP"
+  mkdir -p "$WHISPER_TMP"
+  while read -r _ file; do
+    curl -fL --progress-bar --retry 3 --proto '=https' -o "$WHISPER_TMP/$file" \
+      "https://huggingface.co/$WHISPER_REPO/resolve/$WHISPER_REVISION/$file"
+  done <<<"$WHISPER_SHA256"
+  if ! whisper_model_ok "$WHISPER_TMP"; then
+    rm -rf "$WHISPER_TMP"
+    err "The downloaded Whisper model doesn't match the pinned SHA-256 hashes in scripts/runtime.sh -- not using it."
+    exit 1
+  fi
+  rm -rf "$WHISPER_DIR"
+  mv "$WHISPER_TMP" "$WHISPER_DIR"
+fi
+
 # ---------- 6. Generate WEBUI_SECRET_KEY if empty ----------
 if [[ -z "${WEBUI_SECRET_KEY:-}" ]]; then
   log "Generating WEBUI_SECRET_KEY..."

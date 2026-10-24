@@ -155,6 +155,45 @@ check_webui_ocr_models() {
   fi
 }
 
+check_whisper_model() {
+  # Open WebUI's voice input reads this folder only (HF_HUB_OFFLINE=1), so a
+  # missing or altered file means no transcription, never a download.
+  local name="Voice input model (Whisper small) matches its pinned hashes"
+  if whisper_model_ok; then
+    pass "$name"
+  else
+    fail "$name" "missing or changed in data/whisper/ -- run ./scripts/setup.sh"
+  fi
+}
+
+check_voice_cleanup() {
+  # Open WebUI keeps every voice recording; stack.sh installs
+  # services/voice_cleanup.py as an event function that deletes each one once
+  # it is transcribed. Read-only look at Open WebUI's database.
+  local db="$REPO_ROOT/data/openwebui/webui.db" name="Voice recordings deleted once transcribed (Open WebUI function)" state old
+  if [[ ! -f "$db" ]]; then
+    skip "$name" "Open WebUI has no database yet (run ./scripts/stack.sh up)"
+    return
+  fi
+  state="$(python3 -I - "$db" "$REPO_ROOT/services/voice_cleanup.py" 2>/dev/null <<'PYEOF'
+import pathlib, sqlite3, sys
+db = sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True)
+row = db.execute("SELECT is_active, content FROM function WHERE id = 'delete_voice_recordings'").fetchone()
+print('not installed' if row is None else 'inactive' if not row[0]
+      else 'differs from services/voice_cleanup.py' if row[1] != pathlib.Path(sys.argv[2]).read_text() else 'ok')
+PYEOF
+)"
+  case "$state" in
+    ok) pass "$name" ;;
+    '') fail "$name" "could not read data/openwebui/webui.db" ;;
+    *) fail "$name" "$state -- run ./scripts/stack.sh down && ./scripts/stack.sh up" ;;
+  esac
+  old="$(find "$REPO_ROOT/data/openwebui/cache/audio/transcriptions" -type f -mmin +60 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "$old" -gt 0 ]]; then
+    warn "No voice recordings older than an hour" "$old file(s) in data/openwebui/cache/audio/transcriptions/ (failed transcriptions; deleted at the next one or at restart)"
+  fi
+}
+
 check_pins_match_example() {
   # stack.sh and the gateway are verified against the pins in .env.example;
   # .env is authoritative, so one copied earlier keeps the old versions.
@@ -321,6 +360,8 @@ check_privacy_env() {
   local stack_script="$REPO_ROOT/scripts/stack.sh"
   local required=(
     'OFFLINE_MODE=true'
+    'HF_HUB_OFFLINE=1'
+    "AUDIO_STT_ENGINE=''"
     'ENABLE_VERSION_UPDATE_CHECK=false'
     'ENABLE_COMMUNITY_SHARING=false'
     'DO_NOT_TRACK=true'
@@ -477,6 +518,8 @@ check_ollama
 check_ollama_cache_limits
 check_allowlist
 check_webui_ocr_models
+check_whisper_model
+check_voice_cleanup
 check_pins_match_example
 check_model_built
 check_gateway

@@ -4,8 +4,8 @@ This repo is a self-hosted AI coding assistant stack (Ollama + inference gateway
 
 ## Hard rules
 
-1. **Model allowlist.** Only these models may be pulled, configured, or suggested anywhere (chat, embeddings, reranking, autocomplete):
-   `llama3.1:8b`, `llama3.3:70b` (Meta), `gemma4:12b` (Google DeepMind; approved 2026-10-07 as a stronger 16GB-Mac candidate), `nomic-embed-text` (Nomic), `starcoder2:3b` (BigCode, autocomplete only), and our own derived `coder-local`/`coder-server`.
+1. **Model allowlist.** Only these models may be pulled, configured, or suggested anywhere (chat, embeddings, reranking, autocomplete, speech):
+   `llama3.1:8b`, `llama3.3:70b` (Meta), `gemma4:12b` (Google DeepMind; approved 2026-10-07 as a stronger 16GB-Mac candidate), `nomic-embed-text` (Nomic), `starcoder2:3b` (BigCode, autocomplete only), Whisper small as `Systran/faster-whisper-small` (OpenAI's model in SYSTRAN's CTranslate2 build; Open WebUI speech-to-text only, pinned in `scripts/runtime.sh`; approved 2026-10-24), and our own derived `coder-local`/`coder-server`.
    No models of Chinese origin or anything derived from them (Qwen, DeepSeek incl. "R1-Distill-Llama", Yi, GLM, Baichuan, InternLM, MiniMax, Kimi, BGE, GTE). Watch for tools that default to these quietly (Continue's autocomplete docs recommended Qwen; VS Code's ACP Client extension lists Qwen Code among its built-in agents; many RAG setups default to BGE). Any addition to the allowlist needs explicit approval first.
 2. **Nothing reports out.** Telemetry, analytics, update checks, and sharing features stay off in every component. At runtime the only allowed outbound traffic is Brave Search API calls. Model pulls/updates during setup are expected and documented in `docs/privacy.md`.
 3. **Source code never goes into a search query.** Web search is for public information only (library/API docs, error patterns). Enforced via `prompts/system.md`, which the inference gateway adds to every chat request (Open WebUI and the IDEs), and in code by acp-bridge's guarded `web_search`.
@@ -18,7 +18,7 @@ This repo is a self-hosted AI coding assistant stack (Ollama + inference gateway
 ## The three scripts
 
 ```
-./scripts/setup.sh [--editors]   # idempotent install/config, incl. Ollama's llama-server cache limits (LLAMA_ARG_* in .env: launchctl + ~/Library/LaunchAgents/local-ai-harness.ollama-env.plist on macOS; prints the systemd steps on Linux); --editors prints the IDE registrations (Android Studio, Xcode, VS Code; nothing is written to editor settings) and, on macOS, builds bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
+./scripts/setup.sh [--editors]   # idempotent install/config, incl. the pinned Whisper model for voice input (data/whisper/), Ollama's llama-server cache limits (LLAMA_ARG_* in .env: launchctl + ~/Library/LaunchAgents/local-ai-harness.ollama-env.plist on macOS; prints the systemd steps on Linux); --editors prints the IDE registrations (Android Studio, Xcode, VS Code; nothing is written to editor settings) and, on macOS, builds bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
 ./scripts/stack.sh up|down|status   # gateway + selected backend + Open WebUI + Brave MCP server (skipped if BRAVE_API_KEY is empty)
 ./scripts/doctor.sh               # PASS/FAIL per check; exits non-zero on any failure
 ```

@@ -22,7 +22,7 @@ Then run:
 ./scripts/setup.sh --editors
 ```
 
-Setup prepares the approved Ollama chat model, Nomic embeddings, the gateway, and editor configuration. Increase concurrency only after measuring the workload on the intended hardware.
+Setup prepares the approved Ollama chat model, Nomic embeddings, the Whisper model for Open WebUI's voice input, the gateway, and editor configuration. Increase concurrency only after measuring the workload on the intended hardware.
 
 ## 2. Start and verify
 

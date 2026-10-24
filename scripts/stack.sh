@@ -67,6 +67,13 @@ start_openwebui() {
     echo "ERROR: WEBUI_SECRET_KEY is empty in .env. Run ./scripts/setup.sh first." >&2
     exit 1
   fi
+  if [[ ! -f "$WHISPER_DIR/model.bin" ]]; then
+    echo "WARNING: voice input won't work until ./scripts/setup.sh downloads its model (data/whisper/)" >&2
+  fi
+  # Recordings that failed transcriptions left behind (nothing is in flight
+  # while Open WebUI is down). New ones are deleted by services/voice_cleanup.py
+  # (installed by set_webui_defaults).
+  find "$REPO_ROOT/data/openwebui/cache/audio/transcriptions" -type f -delete 2>/dev/null || true
   echo "Starting Open WebUI on $WEBUI_HOST:$WEBUI_PORT..."
   (
     # `open-webui serve` is a Click CLI with its own --host/--port flags
@@ -100,6 +107,14 @@ start_openwebui() {
     export RAG_EMBEDDING_CONCURRENT_REQUESTS=1
     export RAG_EMBEDDING_BATCH_SIZE=32
     export ENABLE_RAG_HYBRID_SEARCH=false
+    # Voice input (microphone and call buttons) is transcribed here by
+    # faster-whisper with the model setup.sh downloaded. Given a folder it
+    # never contacts the Hugging Face Hub; any other model name would need a
+    # download, which HF_HUB_OFFLINE refuses. VAD stays off: it would load
+    # Silero's model, bundled with faster-whisper and not on the allowlist.
+    # Spoken replies use the browser's own voices (docs/privacy.md).
+    export AUDIO_STT_ENGINE='' WHISPER_MODEL="$WHISPER_DIR" WHISPER_VAD_FILTER=false
+    export AUDIO_TTS_ENGINE=''
     export OFFLINE_MODE=true
     export HF_HUB_OFFLINE=1
     export ENABLE_VERSION_UPDATE_CHECK=false
@@ -154,33 +169,40 @@ start_openwebui() {
   echo "Open WebUI started (pid $(cat "$WEBUI_PID_FILE")); logs at logs/openwebui.log"
 }
 
-# Brave Search on by default in new chats with the chat model (off again
-# without a key). 0.12.3 has no env var for this: it is the model's Tools
-# setting (Admin Settings > Models), kept in Open WebUI's database. Open
-# WebUI's own (async) model API is used so the schema matches the pinned
-# version, and only toolIds changes. A model with no entry yet gets a private
-# one (no access grants), which is what Open WebUI does for models without
-# one: only admins see it.
-# Importing Open WebUI empties STATIC_DIR and refills it from the frontend
-# build, so it gets a scratch STATIC_DIR (the running server's stays intact)
-# and FROM_INIT_PY=true, which `open-webui serve` sets to find that build.
-set_default_tools() {
-  local i ok=true static_tmp
+# Two settings that 0.12.3 keeps only in its database, not in env vars:
+# - Brave Search on by default in new chats with the chat model (off again
+#   without a key): the model's Tools setting (Admin Settings > Models). A
+#   model with no entry yet gets a private one (no access grants), which is
+#   what Open WebUI does for models without one: only admins see it.
+# - services/voice_cleanup.py as an active event function (Admin Settings >
+#   Functions): Open WebUI keeps every voice recording and its transcript,
+#   and this deletes them as soon as they are transcribed.
+# Open WebUI's own (async) APIs are used so the schema matches the pinned
+# version, and only those fields change. Importing Open WebUI empties
+# STATIC_DIR and refills it from the frontend build, so it gets a scratch
+# STATIC_DIR (the running server's stays intact) and FROM_INIT_PY=true, which
+# `open-webui serve` sets to find that build. Each step prints "<step>: ok"
+# on stdout; anything else goes to the log.
+set_webui_defaults() {
+  local i out out_file static_tmp
   for i in $(seq 1 60); do
     curl -fsS --max-time 2 "http://$WEBUI_HOST:$WEBUI_PORT/health" >/dev/null 2>&1 && break
     sleep 1
   done
   static_tmp="$(mktemp -d)"
+  out_file="$(mktemp)"
   DATA_DIR="$REPO_ROOT/data/openwebui" STATIC_DIR="$static_tmp" FROM_INIT_PY=true \
     WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" OFFLINE_MODE=true HF_HUB_OFFLINE=1 \
     CHAT_MODEL="$CHAT_MODEL" BRAVE_ON="$([[ -n "${BRAVE_API_KEY:-}" ]] && echo 1 || echo 0)" \
-    "$REPO_ROOT/.venv/openwebui/bin/python" - >> "$LOG_DIR/openwebui.log" 2>&1 <<'PYEOF' || ok=false
-import asyncio, os
+    VOICE_CLEANUP="$REPO_ROOT/services/voice_cleanup.py" \
+    "$REPO_ROOT/.venv/openwebui/bin/python" - > "$out_file" 2>> "$LOG_DIR/openwebui.log" <<'PYEOF' || true
+import asyncio, os, traceback
+from open_webui.models.functions import FunctionForm, FunctionMeta, Functions
 from open_webui.models.models import ModelForm, ModelMeta, ModelParams, Models
 from open_webui.models.users import Users
 
 
-async def main():
+async def default_tools():
     model_id, tool, want = os.environ['CHAT_MODEL'], 'server:mcp:brave', os.environ['BRAVE_ON'] == '1'
     model = await Models.get_model_by_id(model_id)
     if model is None:
@@ -189,7 +211,7 @@ async def main():
             form = ModelForm(id=model_id, name=model_id, meta=ModelMeta(toolIds=[tool]), params=ModelParams(),
                              access_grants=[])
             if await Models.insert_new_model(form, admin.id if admin else '') is None:
-                raise SystemExit(1)
+                raise RuntimeError(f'could not add {model_id}')
     else:
         meta = model.meta.model_dump()
         tool_ids = list(meta.get('toolIds') or [])
@@ -198,15 +220,45 @@ async def main():
             # Without access_grants the update leaves the model's sharing as it is.
             form = ModelForm(**{**model.model_dump(exclude={'access_grants'}), 'meta': meta})
             if await Models.update_model_by_id(model_id, form) is None:
-                raise SystemExit(1)
+                raise RuntimeError(f'could not update {model_id}')
+
+
+async def voice_cleanup():
+    function_id = 'delete_voice_recordings'
+    with open(os.environ['VOICE_CLEANUP']) as f:
+        content = f.read()
+    function = await Functions.get_function_by_id(function_id)
+    if function is None:
+        admin = await Users.get_super_admin_user()
+        form = FunctionForm(id=function_id, name='Delete voice recordings', content=content,
+                            meta=FunctionMeta(description='Deletes each voice recording once it is transcribed'))
+        function = await Functions.insert_new_function(admin.id if admin else '', 'event', form)
+    if function.content != content or not function.is_active:
+        await Functions.update_function_by_id(function_id, {'content': content, 'is_active': True})
+
+
+async def main():
+    for name, step in (('tools', default_tools), ('voice cleanup', voice_cleanup)):
+        try:
+            await step()
+            print(f'{name}: ok')
+        except Exception:
+            traceback.print_exc()
 
 asyncio.run(main())
 PYEOF
-  rm -rf "$static_tmp"
-  if ! $ok; then
+  out="$(cat "$out_file")"
+  cat "$out_file" >> "$LOG_DIR/openwebui.log"
+  rm -rf "$static_tmp" "$out_file"
+  if [[ "$out" != *'tools: ok'* ]]; then
     echo "WARNING: could not set Open WebUI's default tools for $CHAT_MODEL; see logs/openwebui.log" >&2
   elif [[ -n "${BRAVE_API_KEY:-}" ]]; then
     echo "Brave Search: on by default in new $CHAT_MODEL chats"
+  fi
+  if [[ "$out" != *'voice cleanup: ok'* ]]; then
+    echo "WARNING: could not install the voice-recording cleanup in Open WebUI, so recordings are kept; see logs/openwebui.log" >&2
+  else
+    echo "Voice recordings: deleted as soon as they are transcribed"
   fi
 }
 
@@ -290,7 +342,7 @@ case "${1:-}" in
     start_inference
     start_openwebui
     start_brave
-    set_default_tools
+    set_webui_defaults
     printf '%s' "$current_hash" > "$RUN_DIR/stack.env.sha256"
     echo
     echo "Web UI: http://$WEBUI_HOST:$WEBUI_PORT/"
