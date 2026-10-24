@@ -139,8 +139,9 @@ Edit settings in `.env`; [.env.example](../.env.example) contains the complete l
 | `INFERENCE_TIMEOUT_SECONDS` | `600` | Maximum inference duration |
 | `QUEUE_RETENTION_SECONDS` | `300` | Retention after a job finishes |
 | `QUEUE_MAX_JOBS` | `128` | Maximum jobs, including retained results |
-| `QUEUE_MAX_BODY_BYTES` | `1048576` | Maximum request size |
+| `QUEUE_MAX_BODY_BYTES` | `1048576` | Maximum request size, not counting inline images |
 | `QUEUE_MAX_RESULT_BYTES` | `4194304` | Maximum result size |
+| `QUEUE_MAX_IMAGE_BYTES` | `16777216` | Inline images per chat request (decoded); waiting requests hold theirs in RAM, so lower it on a busy server. `0` refuses images |
 
 Scheduling rotates between accounts and preserves arrival order within each account. Running requests are not preempted. Queue positions may change as other accounts submit work. Capacity limits return HTTP 429 with `Retry-After`.
 
@@ -150,11 +151,11 @@ Open WebUI uses the gateway for chat and embeddings. Persistent WebUI configurat
 
 | Client | Queue behavior |
 |---|---|
-| Xcode ACP with `LLM_QUEUE=1` | Separate activity notifications, job polling, reconnects, and cancellation |
-| Continue | Standard streaming with keepalives; no queue-position display |
+| ACP agents (Xcode, Android Studio, VS Code) with `LLM_QUEUE=1` | Separate activity notifications, job polling, reconnects, and cancellation |
+| Open WebUI, Android Studio model providers | Standard streaming with keepalives; no queue-position display |
 | Xcode plain chat | Standard completion API; no job-reconnect integration |
 
-Standard clients use `/v1/chat/completions` and `/v1/embeddings`. Streaming keepalives are SSE comments and do not become assistant text. Disconnecting a standard request cancels it. Failures after streaming begins are reported in the stream because the HTTP response has already started.
+Standard clients use `/v1/chat/completions` and `/v1/embeddings`. Chat requests may include inline PNG, JPEG or WebP images, budgeted separately by `QUEUE_MAX_IMAGE_BYTES`. Streaming keepalives are SSE comments and do not become assistant text. Disconnecting a standard request cancels it. Failures after streaming begins are reported in the stream because the HTTP response has already started.
 
 Queue-aware clients use:
 

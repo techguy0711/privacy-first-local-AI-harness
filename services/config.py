@@ -41,6 +41,13 @@ def positive(env, name, default):
     return value
 
 
+def non_negative(env, name, default):
+    value = int(env.get(name, default))
+    if value < 0:
+        raise ValueError(f'{name} must be 0 or more')
+    return value
+
+
 @dataclass
 class Settings:
     mode: str
@@ -60,6 +67,7 @@ class Settings:
     max_jobs: int
     max_body: int
     max_result: int
+    max_image: int
     context: int
     ctx_checkpoints: str
     cache_ram: str
@@ -90,7 +98,9 @@ class Settings:
                    positive(e, 'QUEUE_PER_USER', 2), positive(e, 'QUEUE_WAIT_SECONDS', 300),
                    positive(e, 'INFERENCE_TIMEOUT_SECONDS', 600), positive(e, 'QUEUE_RETENTION_SECONDS', 300),
                    positive(e, 'QUEUE_MAX_JOBS', 128), positive(e, 'QUEUE_MAX_BODY_BYTES', 1048576),
-                   positive(e, 'QUEUE_MAX_RESULT_BYTES', 4194304), model_context(mode),
+                   positive(e, 'QUEUE_MAX_RESULT_BYTES', 4194304),
+                   # Decoded inline-image bytes per chat request; 0 refuses images.
+                   non_negative(e, 'QUEUE_MAX_IMAGE_BYTES', 16777216), model_context(mode),
                    # llama-server's prompt-cache RAM, applied to Ollama by setup.sh.
                    optional_int(e, 'LLAMA_ARG_CTX_CHECKPOINTS', '4', 0),
                    optional_int(e, 'LLAMA_ARG_CACHE_RAM', '1024', -1))

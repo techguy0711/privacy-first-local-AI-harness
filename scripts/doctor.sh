@@ -255,6 +255,15 @@ check_brave() {
   fi
 }
 
+# Which editor runs acp-bridge with editors/acp/$1.
+agent_label() {
+  case "$1" in
+    config.toml) echo "Xcode" ;;
+    config.android.toml) echo "Android Studio" ;;
+    config.vscode.toml) echo "VS Code" ;;
+  esac
+}
+
 check_acp_web_search_url() {
   # The acp-bridge configs can't read .env, so the agents' Brave URL is a
   # literal there -- it must point at the server stack.sh starts.
@@ -263,8 +272,8 @@ check_acp_web_search_url() {
     skip "ACP agents' web search URL matches .env" "not macOS (no acp-bridge here)"
     return
   fi
-  for file in config.toml config.android.toml; do
-    [[ "$file" == config.toml ]] && label="Xcode" || label="Android Studio"
+  for file in config.toml config.android.toml config.vscode.toml; do
+    label="$(agent_label "$file")"
     got="$(awk '/^\[\[mcp\.servers\]\]/ {s = 1; next} /^\[/ {s = 0} s && /^[[:space:]]*url[[:space:]]*=/' "$REPO_ROOT/editors/acp/$file" 2>/dev/null \
       | sed -E 's/^[^"]*"([^"]*)".*/\1/')"
     if [[ "$got" == "$want" ]]; then
@@ -332,33 +341,18 @@ check_privacy_env() {
   fi
 }
 
-# True if YAML file $1 has "<$2>:" followed by "disabled: true" (Continue's
-# chatOptions.toolOverrides.<tool>.disabled); trailing "# ..." comments allowed.
-tool_disabled() {
-  awk -v t="$2" '
-    $0 ~ "^[[:space:]]*" t ":[[:space:]]*(#.*)?$" { want = 1; next }
-    want && NF { if ($0 ~ /^[[:space:]]*disabled:[[:space:]]*true[[:space:]]*(#.*)?$/) found = 1; want = 0 }
-    END { exit !found }' "$1"
-}
-
-check_continue_web_tools_off() {
-  # Continue's built-in search_web sends queries to Continue's own cloud proxy
-  # and fetch_url_content fetches arbitrary URLs -- both must stay disabled, in
-  # the repo configs and in the ~/.continue/config.yaml Continue actually reads.
-  local files=("$REPO_ROOT/editors/continue/config.local.yaml" "$REPO_ROOT/editors/continue/config.server.yaml")
-  [[ -f "$HOME/.continue/config.yaml" ]] && files+=("$HOME/.continue/config.yaml")
-  local missing=() f label tool
-  for f in "${files[@]}"; do
-    label="${f#"$REPO_ROOT"/}"
-    [[ "$f" == "$HOME"/.continue/* ]] && label="~/${f#"$HOME"/}"
-    for tool in search_web fetch_url_content; do
-      tool_disabled "$f" "$tool" || missing+=("$label:$tool")
-    done
-  done
-  if [[ ${#missing[@]} -eq 0 ]]; then
-    pass "Continue's search_web/fetch_url_content disabled"
+check_continue_retired() {
+  # Continue is no longer used (VS Code runs the ACP agent). Earlier --editors
+  # runs left copies of BRAVE_API_KEY in .continue/ (the backups readable by
+  # every account), which setup.sh now removes, and ~/.continue/config.yaml,
+  # which is outside the repo and only reported here.
+  local name="No leftovers from Continue (no longer supported)"
+  if [[ -n "$(find "$REPO_ROOT/.continue" -maxdepth 1 -type f -name '.env*' 2>/dev/null)" ]]; then
+    fail "$name" ".continue/ still holds copies of BRAVE_API_KEY -- run ./scripts/setup.sh to remove them"
+  elif grep -qs -e 'coder-local' -e 'coder-server' "$HOME/.continue/config.yaml"; then
+    warn "$name" "~/.continue/config.yaml still points at this stack -- uninstall the Continue extension and delete it (see docs/editors.md, VS Code)"
   else
-    fail "Continue's search_web/fetch_url_content disabled" "not disabled in: ${missing[*]} (re-run ./scripts/setup.sh --editors)"
+    pass "$name"
   fi
 }
 
@@ -375,10 +369,11 @@ check_env_not_tracked() {
 }
 
 check_private_files() {
-  # .env and .continue/.env hold keys; data/ holds every chat, upload and API
-  # key (webui.db). setup.sh and stack.sh make them owner-only.
-  local bad=() path mode name="Secrets and data are owner-only (.env, .continue/.env, data/, logs/, run/)"
-  for path in .env .continue/.env data logs run; do
+  # .env holds keys; data/ holds every chat, upload and API key (webui.db)
+  # and the agents' saved conversations. setup.sh and stack.sh make them
+  # owner-only.
+  local bad=() path mode name="Secrets and data are owner-only (.env, data/, logs/, run/)"
+  for path in .env data logs run; do
     [[ -e "$REPO_ROOT/$path" ]] || continue
     if [[ "$(uname -s)" == "Darwin" ]]; then
       mode="$(stat -f '%Lp' "$REPO_ROOT/$path")"
@@ -395,16 +390,17 @@ check_private_files() {
 }
 
 check_acp_bridge() {
-  # Optional, macOS + Xcode only -- built via `setup.sh --editors`, which writes
-  # bin/acp-bridge.stamp: the version, commit and patch hash it was built from,
-  # plus the hash of the binary it installed.
+  # Optional, macOS only (the Xcode, Android Studio and VS Code agents) --
+  # built via `setup.sh --editors`, which writes bin/acp-bridge.stamp: the
+  # version, commit and patch hash it was built from, plus the hash of the
+  # binary it installed.
   if [[ "$(uname -s)" != "Darwin" ]]; then
-    skip "acp-bridge built (Xcode ACP agent)" "not macOS"
+    skip "acp-bridge built (ACP agents)" "not macOS"
     return
   fi
   local acp_bin="$REPO_ROOT/bin/acp-bridge" patch="$REPO_ROOT/editors/acp/acp-bridge.patch"
   if [[ ! -x "$acp_bin" ]]; then
-    skip "acp-bridge built (Xcode ACP agent)" "not installed (optional; run ./scripts/setup.sh --editors)"
+    skip "acp-bridge built (ACP agents)" "not installed (optional; run ./scripts/setup.sh --editors)"
     return
   fi
   local name="acp-bridge built from pinned v${ACP_BRIDGE_VERSION:-<unset>} + editors/acp/acp-bridge.patch"
@@ -441,10 +437,9 @@ check_acp_config() {
   # web search or persistence settings) when its config doesn't parse, and only
   # says so on stderr. Load it with the installed binary: persistence and MCP
   # off, a dead model URL and no stdin, so nothing is contacted or written.
-  local out file label name
-  for file in config.toml config.android.toml; do
-    [[ "$file" == config.toml ]] && label="Xcode" || label="Android Studio"
-    name="$label agent config loads (editors/acp/$file)"
+  local out file name
+  for file in config.toml config.android.toml config.vscode.toml; do
+    name="$(agent_label "$file") agent config loads (editors/acp/$file)"
     if [[ "$(uname -s)" != "Darwin" ]]; then
       skip "$name" "not macOS"
       continue
@@ -491,7 +486,7 @@ check_brave
 check_acp_web_search_url
 check_localhost_binding
 check_privacy_env
-check_continue_web_tools_off
+check_continue_retired
 check_env_not_tracked
 check_private_files
 check_acp_bridge

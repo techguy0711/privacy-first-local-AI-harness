@@ -1,5 +1,6 @@
 """Single-process, bounded fair queue. No prompt logs or on-disk job store."""
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -31,6 +32,25 @@ def foreign_web_search(tool):
     name, desc = str(fn.get('name', '')).lower(), str(fn.get('description', '')).lower()
     web = 'search' in name and any(w in name for w in ('web', 'internet', 'google', 'bing'))
     return web and 'brave' not in name and 'brave' not in desc
+
+
+def inline_image(part):
+    """An image_url content part rebuilt as just its data URL, plus the image's
+    decoded size. Only PNG, JPEG and WebP sent inline (data:image/...;base64)
+    pass: the gateway never fetches a URL, and Ollama answers "invalid image
+    input" for GIF and doesn't take image links either."""
+    url = part.get('image_url')
+    url = url.get('url') if isinstance(url, dict) else url
+    head, _, data = url.partition(';base64,') if isinstance(url, str) else ('', '', '')
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except ValueError:
+        raw = b''
+    known = raw.startswith((b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff')) or raw[:4] == b'RIFF' and raw[8:12] == b'WEBP'
+    if head not in ('data:image/png', 'data:image/jpeg', 'data:image/jpg', 'data:image/webp') or not known:
+        raise HTTPException(400, 'Images must be PNG, JPEG or WebP sent inline as data:image/...;base64 URLs; '
+                                 'image links are not fetched')
+    return {'type': 'image_url', 'image_url': {'url': url}}, len(raw)
 
 
 @dataclass
@@ -310,14 +330,20 @@ def create_app(cfg=None, transport=None):
             raise HTTPException(503, 'Authentication service unavailable')
 
     async def parse(request, kind):
+        # Inline images have their own budget (QUEUE_MAX_IMAGE_BYTES, decoded;
+        # base64 is 4/3 of that) on top of QUEUE_MAX_BODY_BYTES, which still
+        # limits everything else in the request.
+        limit = cfg.max_body + (4 * -(-cfg.max_image // 3) + 4096 if kind == 'chat' else 0)
         data = bytearray()
         async for chunk in request.stream():
             data.extend(chunk)
-            if len(data) > cfg.max_body:
+            if len(data) > limit:
                 raise HTTPException(413, 'Request exceeds configured limit')
         try:
             body = json.loads(data)
         except ValueError:
+            if len(data) > cfg.max_body:
+                raise HTTPException(413, 'Request exceeds configured limit')
             raise HTTPException(400, 'Invalid JSON')
         if not isinstance(body, dict):
             raise HTTPException(400, 'Expected a JSON object')
@@ -328,15 +354,32 @@ def create_app(cfg=None, transport=None):
                 raise HTTPException(400, 'messages must be a nonempty list')
             if not isinstance(body.get('stream', False), bool):
                 raise HTTPException(400, 'stream must be a boolean')
-            # Keep backend-only paths, remote media and arbitrary backend parameters out.
+            # Text, plus inline images in user messages. Keep backend-only paths,
+            # remote media and arbitrary backend parameters out.
+            image_bytes = image_chars = 0
             for message in body['messages']:
                 if not isinstance(message, dict):
                     raise HTTPException(400, 'Invalid message')
                 content = message.get('content')
-                if isinstance(content, list) and any(not isinstance(p, dict) or p.get('type') != 'text' for p in content):
-                    raise HTTPException(400, 'Only text content is supported')
                 if content is not None and not isinstance(content, (str, list)):
                     raise HTTPException(400, 'Invalid content')
+                if isinstance(content, list):
+                    parts = []
+                    for p in content:
+                        if isinstance(p, dict) and p.get('type') == 'text':
+                            parts.append(p)
+                        elif isinstance(p, dict) and p.get('type') == 'image_url' and message.get('role') == 'user':
+                            part, size = inline_image(p)
+                            image_bytes += size
+                            image_chars += len(part['image_url']['url'])
+                            parts.append(part)
+                        else:
+                            raise HTTPException(400, 'Messages may contain only text, plus inline images in user messages')
+                    message['content'] = parts
+            if image_bytes > cfg.max_image:
+                raise HTTPException(413, 'Images exceed the configured limit (QUEUE_MAX_IMAGE_BYTES)')
+            if len(data) - image_chars > cfg.max_body:
+                raise HTTPException(413, 'Request exceeds configured limit')
             allowed = {'model', 'messages', 'stream', 'temperature', 'top_p', 'max_tokens',
                        'stop', 'tools', 'tool_choice', 'parallel_tool_calls', 'seed',
                        'frequency_penalty', 'presence_penalty', 'stream_options', 'response_format'}

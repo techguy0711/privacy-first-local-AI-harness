@@ -46,6 +46,10 @@ timeout_secs = 600
 # Room kept free for the reply during compaction. The harness reserves at
 # least max_tokens, so the requested output fits alongside the input.
 reserve_output_tokens = 4096
+# Advertise image input (ACP promptCapabilities.image): images Xcode attaches
+# go to the model inline. The gateway accepts PNG, JPEG and WebP data URLs
+# only and coder-local reads them; saved turns keep the images (persist).
+supports_image = true
 system_prompt = '''
 You are a coding agent operating in the user's project directory.
 For requested code changes, act through tool calls rather than pasting proposed code in chat. To create or change files call write_file or edit; to inspect use list_dir/read_file. If blocked, explain what failed and what remains; do not invent another edit just to use a tool.

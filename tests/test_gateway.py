@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import socket
 import unittest
@@ -11,6 +12,13 @@ from services.gateway import Queue, create_app, loopback_sockets
 
 
 BODY = {'model': 'coder-server:latest', 'messages': [{'role': 'user', 'content': 'test'}]}
+PNG = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\n' + bytes(32)).decode()
+
+
+def with_images(*urls, role='user'):
+    parts = [{'type': 'text', 'text': 'What is this?'}]
+    parts += [{'type': 'image_url', 'image_url': {'url': url, 'detail': 'high'}} for url in urls]
+    return {**BODY, 'messages': [{'role': role, 'content': parts}]}
 
 
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
@@ -185,6 +193,37 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.submit()).status_code, 202)
         self.assertEqual((await self.submit(user='bob')).status_code, 429)
 
+    async def test_inline_images_only(self):
+        jid = (await self.submit(with_images(PNG))).json()['id']
+        await self.wait_for(lambda: self.app.state.queue.jobs[jid].state == 'completed')
+        # Passed on as just the data URL (no detail or other backend fields).
+        self.assertEqual(self.calls[-1][1]['messages'][-1]['content'][1], {'type': 'image_url', 'image_url': {'url': PNG}})
+        gif = base64.b64encode(b'GIF89a' + bytes(32)).decode()
+        jpeg_bytes = base64.b64encode(b'\xff\xd8\xff' + bytes(32)).decode()
+        webp = base64.b64encode(b'RIFF\0\0\0\0WEBPVP8 ' + bytes(32)).decode()
+        for url in ('data:image/jpeg;base64,' + jpeg_bytes, 'data:image/webp;base64,' + webp):
+            self.assertEqual((await self.submit(with_images(url), user='bob')).status_code, 202, url)
+        # Ollama refuses GIF and image links; the gateway never fetches a URL.
+        for url in ('https://example.org/a.png', 'data:image/gif;base64,' + gif, 'data:image/png;base64,' + gif,
+                    'data:image/png;base64,not base64!', 'data:text/plain;base64,' + PNG[22:], '/api/v1/files/1/content'):
+            self.assertEqual((await self.client.post('/v1/chat/completions', json=with_images(url))).status_code, 400, url)
+        audio = {**BODY, 'messages': [{'role': 'user', 'content': [{'type': 'input_audio', 'input_audio': {'data': '', 'format': 'wav'}}]}]}
+        for body in (audio, with_images(PNG, role='assistant')):
+            self.assertEqual((await self.client.post('/v1/chat/completions', json=body)).status_code, 400)
+
+    async def test_image_budget_separate_from_body_limit(self):
+        image = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\n' + bytes(3000)).decode()
+        for max_image, body, status in ((6000, with_images(image), 200),  # 4 KB of base64 past a 2 KB body limit
+                                        (6000, with_images(image, image), 413),  # 6016 decoded bytes
+                                        (6000, {**with_images(image), 'stop': ['x' * 3000]}, 413),  # text over 2 KB
+                                        (0, with_images(PNG), 413)):  # 0 refuses images
+            app = create_app(replace(self.cfg, max_body=2048, max_image=max_image), self.transport)
+            async with app.router.lifespan_context(app), httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url='http://test',
+                    headers={'Authorization': 'Bearer alice'}) as client:
+                self.assertEqual((await client.post('/v1/chat/completions', json=body)).status_code, status)
+                self.assertEqual((await client.post('/v1/embeddings', content=b'x' * 2049)).status_code, 413)
+
     async def test_ollama_adapter_uses_same_protocol(self):
         q = self.app.state.queue
         q.cfg = Settings.read({'MODE': 'server', 'INFERENCE_BACKEND': 'ollama'})
@@ -283,7 +322,9 @@ class ConfigTests(unittest.TestCase):
         cfg = Settings.read({'LLAMA_ARG_CACHE_RAM': '-1'})
         self.assertEqual((cfg.ctx_checkpoints, cfg.cache_ram), ('4', '-1'))
         self.assertEqual(Settings.read({'LLAMA_ARG_CTX_CHECKPOINTS': ''}).ctx_checkpoints, '')
-        for env in ({'MODE': 'oops'}, {'INFERENCE_BACKEND': 'other'}, {'QUEUE_ACTIVE': '0'},
+        self.assertEqual(Settings.read({}).max_image, 16777216)
+        self.assertEqual(Settings.read({'QUEUE_MAX_IMAGE_BYTES': '0'}).max_image, 0)
+        for env in ({'MODE': 'oops'}, {'INFERENCE_BACKEND': 'other'}, {'QUEUE_ACTIVE': '0'}, {'QUEUE_MAX_IMAGE_BYTES': '-1'},
                     {'WEBUI_HOST': '0.0.0.0'}, {'OLLAMA_BASE_URL': 'https://external.test'},
                     {'EMBED_MODEL': 'other'}, {'INFERENCE_BACKEND': 'unsupported'},
                     {'LLAMA_ARG_CTX_CHECKPOINTS': '-1'}, {'LLAMA_ARG_CACHE_RAM': '1g'}):

@@ -1,4 +1,5 @@
-# Secrets
+# Secrets (.continue/: Continue's copy of BRAVE_API_KEY from older --editors
+# runs, which setup.sh now removes)
 .env
 .continue/.env
 .continue/.env.*.bak

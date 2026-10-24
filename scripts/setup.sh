@@ -72,7 +72,7 @@ if $INSTALL_EDITORS && [[ "$(uname -s)" == "Darwin" ]]; then
       CARGO="$HOME/.cargo/bin/cargo"
     fi
     if [[ -z "$CARGO" ]]; then
-      err "Rust (cargo) is not installed -- needed to build acp-bridge for the Xcode agent (--editors). This script will not auto-install it."
+      err "Rust (cargo) is not installed -- needed to build acp-bridge for the Xcode, Android Studio and VS Code agents (--editors). This script will not auto-install it."
       cat >&2 <<'EOF'
 Install it yourself first (rustup, https://rustup.rs; Rust 1.86 or newer):
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -332,75 +332,22 @@ fi
 mkdir -p "$REPO_ROOT/data/openwebui" "$REPO_ROOT/run" "$REPO_ROOT/logs"
 chmod 700 "$REPO_ROOT/data" "$REPO_ROOT/run" "$REPO_ROOT/logs"
 chmod 600 "$ENV_FILE"
-if [[ -f "$REPO_ROOT/.continue/.env" ]]; then  # --editors' copy of BRAVE_API_KEY
-  chmod 700 "$REPO_ROOT/.continue"
-  chmod 600 "$REPO_ROOT/.continue/.env"
+# Continue is no longer set up (its repository is read-only; VS Code uses the
+# ACP agent instead). Earlier --editors runs kept a copy of BRAVE_API_KEY for
+# it in .continue/, the backups world-readable: remove them.
+if [[ -n "$(find "$REPO_ROOT/.continue" -maxdepth 1 -type f -name '.env*' 2>/dev/null)" ]]; then
+  find "$REPO_ROOT/.continue" -maxdepth 1 -type f -name '.env*' -delete
+  rmdir "$REPO_ROOT/.continue" 2>/dev/null || true
+  log "Removed .continue/.env and its backups (Continue's copy of BRAVE_API_KEY; Continue is no longer used)"
 fi
 
-# ---------- 8. Optional: install editor configs (--editors) ----------
+# ---------- 8. Optional: editor setup (--editors) ----------
 if $INSTALL_EDITORS; then
-  log "Installing Continue config for MODE=$MODE into ~/.continue/ (--editors)..."
-  mkdir -p "$HOME/.continue"
-
-  SRC_CONFIG="$REPO_ROOT/editors/continue/config.$MODE.yaml"
-  if [[ ! -f "$SRC_CONFIG" ]]; then
-    err "$SRC_CONFIG not found"
-    exit 1
+  # ~/.continue is outside this repo, so setup only points at what an earlier
+  # run wrote there.
+  if grep -qs -e 'coder-local' -e 'coder-server' "$HOME/.continue/config.yaml"; then
+    log "Continue is no longer used: VS Code now runs the ACP agent printed below. Uninstall the Continue extension and delete ~/.continue/config.yaml (and its .bak copies) yourself."
   fi
-  if [[ "$MODE" == "server" && -z "${SERVER_HOST:-}" ]]; then
-    err "SERVER_HOST is empty in .env -- required in server mode for the Continue config (see docs/server.md)"
-    exit 1
-  fi
-
-  # Writes $1's content to $2 ($3 = what to log) only if it differs, backing
-  # up the old $2 first, so a re-run with nothing changed writes nothing and
-  # leaves no new backup. Called as a plain command, never as an `if`
-  # condition (bash ignores set -e there); each step also stops the script
-  # itself, so a failed backup never lets the original be overwritten.
-  replace_if_changed() {
-    local new="$1" dest="$2" what="$3" backup
-    if [[ -f "$dest" ]] && cmp -s "$new" "$dest"; then
-      rm -f "$new"
-      log "$dest already up to date"
-      return 0
-    fi
-    if [[ -f "$dest" ]]; then
-      backup="$dest.$(date +%Y%m%d%H%M%S).bak"
-      if ! cp "$dest" "$backup"; then
-        err "could not back up $dest to $backup -- left $dest unchanged"
-        rm -f "$new"
-        exit 1
-      fi
-      log "Backed up existing $dest to $backup"
-    fi
-    if ! cat "$new" > "$dest"; then
-      err "could not write $dest"
-      rm -f "$new"
-      exit 1
-    fi
-    rm -f "$new"
-    log "Wrote $dest$what"
-  }
-
-  DEST_CONFIG="$HOME/.continue/config.yaml"
-  NEW_CONFIG="$(mktemp)"
-  sed \
-    -e "s|__SYSTEM_PROMPT_PATH__|file://$REPO_ROOT/prompts/system.md|g" \
-    -e "s|__SERVER_HOST__|${SERVER_HOST:-}|g" \
-    -e "s|__GATEWAY_BASE_URL__|$GATEWAY_BASE_URL/v1|g" \
-    -e "s|__EDITOR_TIMEOUT_MS__|$EDITOR_TIMEOUT_MS|g" \
-    "$SRC_CONFIG" > "$NEW_CONFIG"
-  replace_if_changed "$NEW_CONFIG" "$DEST_CONFIG" ""
-
-  CONTINUE_ENV_DIR="$REPO_ROOT/.continue"
-  mkdir -p "$CONTINUE_ENV_DIR"
-  chmod 700 "$CONTINUE_ENV_DIR"
-  CONTINUE_ENV_FILE="$CONTINUE_ENV_DIR/.env"
-  NEW_CONTINUE_ENV="$(mktemp)"
-  printf 'BRAVE_API_KEY=%s\n' "${BRAVE_API_KEY:-}" > "$NEW_CONTINUE_ENV"
-  replace_if_changed "$NEW_CONTINUE_ENV" "$CONTINUE_ENV_FILE" " (BRAVE_API_KEY synced from .env; gitignored)"
-  chmod 600 "$CONTINUE_ENV_FILE"  # a secret, like .env
-  log "Remaining manual step: disable telemetry in the IDE (see docs/editors.md) -- it's an IDE toggle, not a config.yaml key."
 
   # Android Studio: its own model providers setting replaces the deprecated
   # Continue JetBrains plugin. Nothing is written to its settings; these are
@@ -538,6 +485,42 @@ errors back to the model.
   2. Pick "$ACP_AGENT_NAME agent" in the agent window. Don't install agents from
      the registry list there: they are downloaded and talk to their own clouds.
 Privacy notes and what is still unverified: docs/editors.md (Android Studio agent).
+EOF
+
+    # VS Code agent: the same binary with editors/acp/config.vscode.toml, run
+    # by the ACP Client extension. Nothing is written to VS Code's settings;
+    # these lines go into the user's settings.json. acp.agents replaces the
+    # extension's built-in agent list (npx packages that talk to their
+    # vendors' clouds).
+    cat <<EOF
+
+VS Code agent (replaces Continue): same acp-bridge, run by the "ACP Client"
+extension (formulahendry.acp-client). After each change it builds the project
+when it has a build and sends the errors back to the model.
+  1. Install "ACP Client" (publisher formulahendry) from the Extensions view.
+  2. Command Palette > "Preferences: Open User Settings (JSON)", and add inside
+     the outer braces (put a comma after the setting before it):
+  "acp.agents": {
+    "$ACP_AGENT_NAME agent": {
+      "command": "$ACP_BIN",
+      "args": ["$REPO_ROOT/editors/acp/config.vscode.toml"],
+      "env": {
+        "LLM_BASE_URL": "$ACP_LLM_BASE_URL",
+        "LLM_MODEL": "$ACP_LLM_MODEL",
+        "LLM_MODEL_CONTEXT": "$MODEL_CONTEXT",
+        "LLM_QUEUE": "1",
+        "LLM_TIMEOUT": "$((EDITOR_TIMEOUT_MS / 1000))"$ACP_API_KEY_JSON
+      }
+    }
+  },
+  "acp.logTraffic": false,
+  "telemetry.telemetryLevel": "off"
+     The agent list replaces the extension's built-in agents (npx packages that
+     talk to their own clouds). logTraffic off keeps prompts and code out of
+     VS Code's output panel; telemetry off also stops the extension's usage events.
+  3. Open "ACP Client" in the activity bar and connect to "$ACP_AGENT_NAME agent".
+Saved agent conversations: $REPO_ROOT/data/acp-bridge-vscode/
+Details: docs/editors.md (VS Code).
 EOF
   fi
 fi

@@ -36,6 +36,8 @@
 max_tokens = 4096
 timeout_secs = 600
 reserve_output_tokens = 4096
+# Image input on, as in config.toml (inline PNG, JPEG and WebP only).
+supports_image = true
 system_prompt = '''
 You are a coding agent operating in the user's Android project directory.
 For requested code changes, act through tool calls rather than pasting proposed code in chat. To create or change files call write_file or edit; to inspect use list_dir/read_file. If blocked, explain what failed and what remains; do not invent another edit just to use a tool.

@@ -1,30 +1,34 @@
 # Editors
 
-Covers Continue (VS Code), Android Studio's built-in model providers, and Xcode's built-in chat provider support plus its ACP agent support (via `acp-bridge`). Chat and embeddings use the inference gateway: loopback in local mode, private TLS with personal Open WebUI API keys in server mode. The gateway sends inference requests to Ollama.
+Covers the ACP agent (`acp-bridge`) in VS Code, Android Studio and Xcode, Android Studio's built-in model providers, and Xcode's built-in chat provider. Chat and embeddings use the inference gateway: loopback in local mode, private TLS with personal Open WebUI API keys in server mode. The gateway sends inference requests to Ollama. Chat requests may carry images: inline PNG, JPEG or WebP (`data:image/...;base64`) in user messages, up to `QUEUE_MAX_IMAGE_BYTES` (16 MiB decoded) per request. GIF and image links are refused, so the gateway never fetches anything.
 
-## Continue (VS Code)
+## VS Code (ACP agent)
 
-1. Install the Continue extension from the VS Code marketplace.
-2. Install the repo's config for your current `MODE`:
-   ```
-   ./scripts/setup.sh --editors
-   ```
-   This writes `editors/continue/config.${MODE}.yaml` into place as `~/.continue/config.yaml`, with `__SYSTEM_PROMPT_PATH__` and, in server mode, `__SERVER_HOST__` substituted for real values; an existing, different file is backed up with a timestamp first (if that backup fails, setup stops and leaves the file alone), and an identical one is left untouched. It also writes a gitignored `.continue/.env` inside this repo containing `BRAVE_API_KEY`, synced from the repo's root `.env` — Continue's secrets resolver reads that file, not the root `.env` directly.
-3. Nothing else is required for chat, embeddings, or the Brave MCP tool — they're all in the generated `config.yaml`.
+VS Code runs the same `acp-bridge` as Xcode and Android Studio, through the **ACP Client** extension (`formulahendry.acp-client`, MIT; 0.2.0 read 2026-10-23), with `editors/acp/config.vscode.toml`. It replaces Continue, whose repository is read-only since its final 2.0.0 release (see "Why not Continue" below), so Continue gets no more fixes.
 
-**Built-in web tools off**: Continue's own `search_web` tool sends the model's query to Continue's cloud proxy (not Brave), and `fetch_url_content` fetches any URL — both would break "nothing reports out". Both configs disable them per chat model with `chatOptions.toolOverrides.<tool>.disabled: true` (verified in the Continue 2.0.0 source: the tool is removed entirely), and `doctor.sh` checks the repo configs and the installed `~/.continue/config.yaml`. Web search goes through the Brave MCP server instead.
+**Setup** (macOS, after `./scripts/setup.sh --editors`, which prints the exact lines for your `MODE`):
+1. Install **ACP Client** (publisher formulahendry) from the Extensions view. Uninstall Continue and delete the `~/.continue/config.yaml` (and its `.bak` copies) that earlier `--editors` runs wrote; `setup.sh` removes the copy of `BRAVE_API_KEY` it kept for Continue in this repo's `.continue/`, and `doctor.sh` reports anything left.
+2. Command Palette → **Preferences: Open User Settings (JSON)**, and add the lines setup printed:
+   - `"acp.agents"` with one entry, **Gemma 4 12B (Local) agent** or **Llama 3.3 70B (Server) agent**: `command` (absolute path to `bin/acp-bridge`), `args` (absolute path to `editors/acp/config.vscode.toml`) and `env` (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_MODEL_CONTEXT`, `LLM_QUEUE=1`, `LLM_TIMEOUT`, and in server mode `LLM_API_KEY`, your personal Open WebUI key). This list replaces the extension's 11 built-in agents, which run `npx` packages (Claude Code, Gemini CLI, Codex CLI, Qwen Code, …) that talk to their vendors' clouds.
+   - `"acp.logTraffic": false`. Otherwise the extension copies every protocol message, with your prompts, file contents and images, into its **ACP Traffic** output panel.
+   - `"telemetry.telemetryLevel": "off"`. The extension reports usage events (agent name, message length, connect errors) through VS Code's telemetry library, which follows this setting; it also turns off VS Code's own telemetry.
+3. Start the stack (`./scripts/stack.sh up`; the gateway serves the model and web search needs the local Brave server), open **ACP Client** in the activity bar and connect to the agent.
 
-**Telemetry**: Continue's "Allow Anonymous Telemetry" setting is an IDE toggle, not a `config.yaml` key — current docs confirm there's no way to script this into the committed config. Turn it off once per machine:
-- Continue's own settings page (gear icon in the Continue panel) → toggle "Allow Anonymous Telemetry" off.
-- VS Code additionally has its own override: Settings → search "Continue: Telemetry Enabled" → uncheck. (This VS Code setting overrides the Continue settings-page toggle if they disagree.)
+Don't use the extension's **ACP: Browse Agent Registry** command: it downloads the agent list from `cdn.agentclientprotocol.com`, and its agents talk to their own clouds. Other AI extensions (Copilot, Gemini Code Assist, …) send code to their vendors; disable them in workspaces you use with this stack.
 
-**Autocomplete**: off. The gateway serves chat and embeddings only, so the Continue configs have no autocomplete model (see the end of this guide). Don't add Continue's own documented recommendation (`qwen2.5-coder`): it isn't on the model allowlist.
+**What the agent does**: the tools, guards, notes and guarded Brave `web_search` described under Xcode below. The extension starts it through your login shell with the first workspace folder as its working directory, so build tools on your shell's `PATH` are found. After a turn that changed files it builds the project and sends the errors back, up to 3 builds per turn: `cargo check --offline`, `./gradlew --offline …`, `go build` with `GOPROXY=off`, `swift build --disable-automatic-resolution`, `tsc --noEmit`, or `xcodebuild`. A `package.json` with a `build` script runs `npm run build` instead, which does whatever that script does (see `docs/privacy.md`); a project with none of these isn't built. Conversations are saved in `data/acp-bridge-vscode/`, apart from the other IDEs'.
+
+**Images and files**: the agent advertises image input (`supports_image`), so images a client attaches reach the model. ACP Client 0.2.0 sends text only (its file attachment isn't functional yet and it has no image paste), so in VS Code name the files you mean ("look at src/app.ts") and the agent reads them; for a screenshot, use Open WebUI.
+
+**Checked headless (2026-10-23)**, driven over stdio the way the extension does it (`initialize` with its client capabilities, `session/new` with the project folder and no MCP servers, `session/prompt`): the agent advertised image input and read a screenshot sent as an ACP image block through the gateway's job API; on a small Cargo project, "add a function double(x: i32) -> i32 … and make main print double(21)" took 31 s (list, read, write, then `cargo check --offline` passed). **Not verified yet**: a session inside VS Code itself, and a connection audit of the extension.
+
+**Autocomplete**: off. The gateway serves chat and embeddings only (see the end of this guide).
 
 ## Android Studio
 
 Android Studio uses its own **model providers** setting to talk to the inference gateway. The Continue plugin is no longer an option. Checked 2026-10-15 on Android Studio Rabbit 1 | 2026.2.1 (build `AI-262.9437.185`).
 
-**Why not Continue**: Continue's JetBrains plugin is tagged `deprecated` on the JetBrains Marketplace. The IDE-facing search and update endpoints return no Continue entry for any JetBrains build tried (Android Studio `AI-262` and `AI-251`, IntelliJ IDEA `IU-251` to `IU-262`), so it can't be found or installed from inside any JetBrains IDE. This is not a version lag: the last release (1.0.67, 2026-03-27) declares `since-build 241` with no upper bound. Continue's repository is read-only and 2.0.0 was its final release. Don't sideload the old zip, since it will get no fixes. `setup.sh --editors` still writes `~/.continue/config.yaml` for VS Code. Other JetBrains IDEs (IntelliJ IDEA, PyCharm, …) currently have no supported path in this repo.
+**Why not Continue**: Continue's JetBrains plugin is tagged `deprecated` on the JetBrains Marketplace. The IDE-facing search and update endpoints return no Continue entry for any JetBrains build tried (Android Studio `AI-262` and `AI-251`, IntelliJ IDEA `IU-251` to `IU-262`), so it can't be found or installed from inside any JetBrains IDE. This is not a version lag: the last release (1.0.67, 2026-03-27) declares `since-build 241` with no upper bound. Continue's repository is read-only and 2.0.0 was its final release. Don't sideload the old zip, since it will get no fixes. VS Code moved to the ACP agent for the same reason (since 2026-10-23; see VS Code above). Other JetBrains IDEs (IntelliJ IDEA, PyCharm, …) currently have no supported path in this repo.
 
 **Local mode** (start the stack first with `./scripts/stack.sh up`):
 1. Settings → Tools → AI → **Model Providers** → **+** → **Local Provider**.
@@ -39,7 +43,7 @@ Android Studio uses its own **model providers** setting to talk to the inference
 
 `setup.sh --editors` prints these values for your current `MODE`. Nothing is written to Android Studio's settings.
 
-**How it talks to the gateway**: Android Studio's OpenAI client tries the Responses API (`/v1/responses`) first. The gateway answers 404, and Android Studio switches that provider to `/v1/chat/completions`; its log shows `Falling back to Completion API. Error: 404`. Android Studio sends its instructions as `developer`-role messages, which `coder-local` follows like system messages. The gateway prepends `prompts/system.md` to every chat request, so Android Studio gets the same search rules as the other clients. Responses stream with no queue-position display (same as Continue).
+**How it talks to the gateway**: Android Studio's OpenAI client tries the Responses API (`/v1/responses`) first. The gateway answers 404, and Android Studio switches that provider to `/v1/chat/completions`; its log shows `Falling back to Completion API. Error: 404`. Android Studio sends its instructions as `developer`-role messages, which `coder-local` follows like system messages. The gateway prepends `prompts/system.md` to every chat request, so Android Studio gets the same search rules as the other clients. Responses stream with no queue-position display (same as Open WebUI).
 
 **Verified locally (2026-10-15, 16GB Mac, `coder-local`)**: a plain question and an Agent Mode request in the Agent tab were both answered by the local model through the gateway. Each agent turn sent 12.9K–14.8K prompt tokens (Android Studio's own agent prompt and tool definitions take about 12.5K), against the Modelfile's `num_ctx 16384` at the time. Turns took 17 s to 2.5 min.
 
@@ -47,7 +51,7 @@ Android Studio uses its own **model providers** setting to talk to the inference
 
 **Timeouts (2026-10-18)**: Android Studio cancels any single request after 10 minutes. At about 10 tokens/s on a 16 GB M5, one 6,252-token reply ran past that. Its client then retried only `localhost`'s IPv6 address, `[::1]:8787`, and failed with "Connection refused" until restarted. The gateway now listens on `::1` as well, so the retry goes through. A reply longer than about 5,500 tokens still hits the 10-minute limit on that Mac. Asking for one change at a time and starting a new Agent chat per task keeps replies and prompts shorter. One request hit the gateway's `INFERENCE_TIMEOUT_SECONDS` (600 s) and Android Studio retried it on its own. For quick questions, Open WebUI or Xcode's plain chat is faster.
 
-**Privacy** (see `docs/privacy.md`): Google says it does not see prompts or responses exchanged with a third-party or local provider. Android Studio still contacts Google on its own, whichever model you pick (server flags, experiments, an Android docs index download, lint jars from `maven.google.com`). While a Google account is signed in to Gemini, it also checks that account's Gemini quota when the Agent tab is used; this happened during the test above. Its agent has a built-in `web_search` tool (run through a Gemini model, not Brave). The gateway removes it from every request, so the model can't call it and answers from what it knows instead. For current information, use Open WebUI, Continue or the Xcode agent, which search through Brave. Its Android-docs tools (`search_android_docs`, `fetch_android_docs`) pass through unchanged. **Not verified yet**: whether those docs tools reach Google while the local provider is selected, and whether the local provider works with the Google account signed out. Turn off usage statistics under Settings → Appearance & Behavior → System Settings → **Data Sharing**.
+**Privacy** (see `docs/privacy.md`): Google says it does not see prompts or responses exchanged with a third-party or local provider. Android Studio still contacts Google on its own, whichever model you pick (server flags, experiments, an Android docs index download, lint jars from `maven.google.com`). While a Google account is signed in to Gemini, it also checks that account's Gemini quota when the Agent tab is used; this happened during the test above. Its agent has a built-in `web_search` tool (run through a Gemini model, not Brave). The gateway removes it from every request, so the model can't call it and answers from what it knows instead. For current information, use Open WebUI or an ACP agent (Xcode, Android Studio, VS Code), which search through Brave. Its Android-docs tools (`search_android_docs`, `fetch_android_docs`) pass through unchanged. **Not verified yet**: whether those docs tools reach Google while the local provider is selected, and whether the local provider works with the Google account signed out. Turn off usage statistics under Settings → Appearance & Behavior → System Settings → **Data Sharing**.
 
 ### Agent (ACP, via acp-bridge — preview, macOS)
 
@@ -66,6 +70,7 @@ Needs Android Studio Rabbit 2 | 2026.2.2 (build `AI-262.10968.63` checked, 2026-
 - **Android Studio's tools aren't used**: build diagnostics, Compose previews, emulator control and Android docs search come from an MCP server Android Studio offers the agent. acp-bridge ignores it (`client_servers = "off"`). The model works with acp-bridge's own file, search, `bash` and git tools, and Gradle for builds.
 - **Separate history**: its conversations are saved in `data/acp-bridge-android/`, apart from the Xcode agent's `data/acp-bridge/`, so neither IDE lists the other's.
 - **Edits go straight to disk**: Android Studio picks them up from the file system, so its accept/reject review of agent changes doesn't apply. Keep the project under git (or use Local History).
+- **Images**: on, as for the Xcode agent (since 2026-10-23); not yet checked inside Android Studio.
 - **Offline builds**: the build can only use libraries already in Gradle's cache, so the prompt tells the model not to add dependencies or plugins. After you add one yourself, sync once in Android Studio first.
 - `bash` is unsandboxed, as in Xcode (see below and `docs/privacy.md`).
 
@@ -115,6 +120,7 @@ Xcode 27 supports the Agent Client Protocol (ACP) — a JSON-RPC-over-stdio stan
 - **Xcode diagnostics / BuildProject**: after each Swift edit, acp-bridge asks Xcode for that file's errors (`XcodeRefreshCodeIssuesInFile`) and appends them to the edit's result, so a wrong fix shows up in the same round; builds run in Xcode (shown there, Xcode's DerivedData, no competing `xcodebuild`).
 - **Brave web search with a guard**: a slim `web_search` tool, through the Brave server `./scripts/stack.sh up` starts (only while it answers; the key stays with that server, acp-bridge needs none). A privacy guard in code refuses queries containing code, paths, file names, URLs, key-like strings, or names declared in your project; 3 searches per turn, 20 per conversation.
 - **Saved, resumable conversations**: stored in the repo's gitignored `data/acp-bridge/` (dirs `0700`, files `0600`, keys/tokens redacted), deleted 30 days after last use, so Xcode can reopen a conversation after a restart. They contain prompts and source excerpts the model saw; `LLM_PERSIST=0` in the agent's env turns this off.
+- **Images** (since 2026-10-23): the agent advertises image input (`supports_image = true`), so an image Xcode attaches to a message goes to the model inline, and saved conversations keep it. Not yet checked inside Xcode.
 
 Tool access stays narrow: of the MCP servers Xcode passes, only its own `mcpbridge` at `/Applications/Xcode.app` or `/Applications/Xcode-beta.app` is started (a differently named install, e.g. `/Applications/Xcode-27.0.app`, is refused and the agent runs without Xcode's tools — add its `.../Contents/Developer/usr/bin/mcpbridge` path to `[mcp] allowed_commands` in `editors/acp/config.toml`); acp-bridge may call `DocumentationSearch`, `XcodeRefreshCodeIssuesInFile`, `BuildProject` and `XcodeGlob`, and the model sees only `docs_search`. Xcode's crash and field-performance tools (they fetch data from App Store Connect) are refused in code whatever the config says. All of this is set in `editors/acp/config.toml`.
 
@@ -181,11 +187,12 @@ Results survive temporary disconnects within the gateway's retention window,
 not gateway restarts. The Xcode agent already used nonstreaming completions for
 its tool loop; this change preserves that behavior.
 
-Continue uses the same gateway's standard streaming endpoint, with a timeout
-covering queue + generation deadlines. Keepalive comments prevent idle silence
-but **do not display queue position**. Continue and Xcode plain-chat do not have
-job-reconnect integration in this change. Adding their visible queue UI requires
-client-specific work. No queue text is injected into assistant answers or code.
+The Android Studio and VS Code agents are the same acp-bridge and use the same
+transport (`LLM_QUEUE=1`). Open WebUI, Android Studio's model providers and
+Xcode's plain chat use the gateway's standard streaming endpoint. Keepalive
+comments prevent idle silence but **do not display queue position**, and those
+clients do not have job-reconnect integration. Adding their visible queue UI
+requires client-specific work. No queue text is injected into assistant answers or code.
 Checked in Xcode 27 beta on 2026-10-14: bridge status lines (for example the
 compaction notice) appear in the agent's thinking as separate `[acp-bridge]`
 paragraphs; see "Status messages" below.
@@ -203,5 +210,4 @@ paragraph starting with `[acp-bridge]`. Xcode 27 beta does not advertise notices
 34 did before). If a later Xcode advertises notices, those paragraphs move out of
 the thinking stream.
 
-Autocomplete remains disabled and is not routed by the new gateway. This replaces
-the earlier advice to simply uncomment a StarCoder block in these configs.
+Autocomplete remains disabled and is not routed by the gateway.

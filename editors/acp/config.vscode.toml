@@ -1,0 +1,85 @@
+# acp-bridge config for the VS Code ACP agent -- passed as the agent's only
+# argument in VS Code's "acp.agents" setting (the ACP Client extension; see
+# docs/editors.md). Same binary as the Xcode (config.toml) and Android Studio
+# (config.android.toml) agents; endpoint/model/key stay in the agent's env in
+# that setting, which override anything here, so this file is the same in both
+# MODEs. It replaces the Continue extension, which is no longer maintained.
+#
+# The ACP Client extension starts the agent through your login shell with the
+# first workspace folder as its working directory, sends text-only prompts and
+# offers no MCP servers (session/new gets mcpServers: []). Its own file and
+# terminal capabilities are not used: acp-bridge runs its own tools.
+#
+# Images: the gateway accepts inline PNG, JPEG and WebP and coder-local reads
+# them, so supports_image is on. The extension can't attach images or files
+# yet; clients that can (Xcode, Android Studio) send them the same way.
+#
+# Build-and-fix: [verify] "auto" builds the project after every turn that
+# changed files and sends the errors back (Xcode/SwiftPM, Cargo, Gradle and Go
+# offline; tsc --noEmit for TypeScript). A package.json with a "build" script
+# runs `npm run build`, which does whatever that script does, network
+# included (some frameworks send build telemetry) -- see docs/privacy.md.
+#
+# bash: as in config.toml, acp-bridge's `bash` tool runs whatever command the
+# model writes, in the project folder, without a sandbox. The prompt line
+# against network commands is an instruction to the model, not enforcement.
+
+[llm]
+# No temperature on purpose (gemma4's own defaults; see config.toml).
+max_tokens = 4096
+timeout_secs = 600
+reserve_output_tokens = 4096
+supports_image = true
+system_prompt = '''
+You are a coding agent operating in the user's project directory, the folder open in VS Code.
+For requested code changes, act through tool calls rather than pasting proposed code in chat. To create or change files call write_file or edit; to inspect use list_dir/read_file. If blocked, explain what failed and what remains; do not invent another edit just to use a tool.
+Use write_file to create a small complete new file and edit for focused corrections to existing files. Keep each change focused enough to fit one reply. You may correct a file you already changed when diagnostics require it. Preserve unrelated declarations and behavior, then summarize the verified result.
+Only the tools in your tool list exist; never call another tool name.
+Paths are relative to the working directory, which is the project root: "src/app/main.ts".
+Fixing a compile error: the error, file and line are in the message. Read that file once if needed, then edit it. Never search the project for standard library or third-party types: they are not declared in the project.
+Use only libraries the project already declares. Don't add dependencies or change versions unless the user asks: builds run offline and cannot download anything new. If a change needs a new library, say so instead of adding it.
+Don't build the project yourself: after your final answer the project is built automatically when it has a build, and any errors are sent back to you to fix.
+If the user's message includes an image (a screenshot, a mockup, a diagram), work from what it shows.
+If you have web_search: use it only for public facts (library or language documentation, a generic error message), with at most 12 generic words. Never include code, file names, paths, or names from this project.
+Never use bash for anything that reaches the network (curl, wget, git clone/fetch/pull/push, package installs).
+If you have the notes tool, record the goal and key findings (file:line) on long tasks.
+For changes to existing code, read the affected files before editing and preserve unrelated code. Create new files only when the requested change needs them. Define each type and each top-level function in exactly one file; never repeat one that another file already defines.
+When continuing after a failure, use the prior goal and error, read the current affected file, and choose a corrected edit. Never repeat the same failed arguments or replace text with identical text. If you cannot find a different valid action, explain the blocker.
+Make exactly ONE tool call per reply, then wait for its result before the next call. Never put two tool calls in the same reply.
+Keep your reasoning short: decide and act. If you are unsure about an API, use the most likely one instead of deliberating; never repeat the same consideration.
+'''
+
+[guards]
+investigate_limit = 6
+loop_check = true
+max_reasoning_chars = 12000
+
+[notes]
+enabled = true
+
+# Detects the build from the project root (see the header). Defaults
+# otherwise (3 builds, 300 s).
+[verify]
+command = "auto"
+
+[mcp]
+client_servers = "off"
+connect_timeout_secs = 30
+web_search = true
+
+# Same Brave server as config.toml; the url must match BRAVE_MCP_HOST /
+# BRAVE_MCP_PORT in .env (doctor.sh checks every agent config).
+[[mcp.servers]]
+name = "brave"
+url = "http://127.0.0.1:8765/mcp"
+allow = ["brave_web_search"]
+role = "web_search"
+call_timeout_secs = 20
+
+# Its own folder in the repo's gitignored data/, apart from the Xcode and
+# Android Studio agents' folders, so no IDE lists another's conversations.
+# Saved turns include any images sent with them.
+[persist]
+enabled = true
+state_dir = "../../data/acp-bridge-vscode"
+retention_days = 30

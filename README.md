@@ -1,12 +1,12 @@
 # Self-hosted AI coding stack
 
-Run a local or shared coding assistant with Ollama. A common inference gateway supplies bounded per-user queues, while Open WebUI, Brave Search (MCP), Continue and Xcode ACP provide the user interfaces.
+Run a local or shared coding assistant with Ollama. A common inference gateway supplies bounded per-user queues, while Open WebUI, Brave Search (MCP) and an ACP agent (`acp-bridge`) for Xcode, Android Studio and VS Code provide the user interfaces.
 
 See [server setup and Mac testing](docs/server.md) for Ollama deployment and queue limitations.
 
 ## Before you start
 
-**What you need (local mode):** a Mac with at least 16 GB of memory (tested on an Apple Silicon Mac with 16 GB) and about 15 GB of free disk: 8 GB for the model, 2 GB for Open WebUI, and 2.5 GB to build the Xcode agent. The Xcode agent needs Xcode 27 (tested with 27.0 and the 27 beta).
+**What you need (local mode):** a Mac with at least 16 GB of memory (tested on an Apple Silicon Mac with 16 GB) and about 15 GB of free disk: 8 GB for the model, 2 GB for Open WebUI, and 2.5 GB to build the IDE agent. The Xcode agent needs Xcode 27 (tested with 27.0 and the 27 beta).
 
 **Where to put the project:** clone it into a normal folder such as `~/Developer`, **not** `~/Downloads`, `~/Desktop` or `~/Documents`. macOS privacy protection covers those three, so it asks extra permission prompts and can block agents that Xcode starts:
 
@@ -39,11 +39,11 @@ If you already have a `.env`, keep it. Open `.env` and confirm `MODE=local`. Set
 ./scripts/setup.sh --editors
 ```
 
-This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-text`) and Open WebUI, writes `~/.continue/config.yaml` (backing up a different existing one), and copies the Brave key into this project's gitignored `.continue/.env`. On macOS it also builds the Xcode agent (`acp-bridge`) from source, which needs Rust — see the [prerequisites](#one-time-prerequisites).
+This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-text`) and Open WebUI. On macOS it also builds the IDE agent (`acp-bridge`, which Xcode, Android Studio and VS Code run) from source, which needs Rust — see the [prerequisites](#one-time-prerequisites). Nothing is written to your editors' settings; setup prints what to enter.
 
 Every run of `setup.sh` also limits how much RAM Ollama spends caching prompts (`LLAMA_ARG_*` in `.env`; by default it could use about 8 GB, enough to push a 16 GB Mac into swap). This doesn't shorten the model's context. On macOS it adds a login item that keeps the limit after a restart. When setup says so, quit and reopen the Ollama app once.
 
-**Read the terminal output before closing it:** the script prints the exact values to enter in Android Studio's model provider settings, the JSON for the optional Android Studio agent, and the paths and environment values for registering the Xcode agent. Finish the IDE steps below after setup.
+**Read the terminal output before closing it:** the script prints the exact values to enter in Android Studio's model provider settings, the JSON for the optional Android Studio agent, the paths and environment values for registering the Xcode agent, and the settings for the VS Code agent. Finish the IDE steps below after setup.
 
 For Web UI only, run `./scripts/setup.sh` instead.
 
@@ -60,6 +60,7 @@ The command starts the inference gateway, Open WebUI and, when a Brave key is se
 ### 4. Finish the one-time Web UI settings
 
 - The inference gateway adds [prompts/system.md](prompts/system.md) and today's date to chat requests automatically.
+- **Images and files**: attach them in the message box. Screenshots and other images (PNG, JPEG or WebP, not GIF) go to the model, which reads them; documents (PDF, text, code) are read by Open WebUI on this machine and passed on as text. The gateway takes images only when they're sent inline and never fetches a link.
 - With `BRAVE_API_KEY` set, `stack.sh up` adds **Brave Search** to Open WebUI and turns it on by default in new `coder-local` chats; there is nothing to configure. The model decides when to search, for example for current events or the latest version of a tool. Each message then takes longer, because the model first decides whether to search. To turn search off for one chat, click the wrench icon in the message box and switch off **Brave Search**. `stack.sh up` turns it back on as the default for new chats, even if you turned it off in **Admin Settings → Models**. Open WebUI connects to the local Brave MCP server, which holds the key, so the key never enters Open WebUI. Don't add tool connections in Admin Settings: Open WebUI forgets them at restart, because `stack.sh` makes `.env` authoritative.
 
 ### 5. Connect your IDE
@@ -70,12 +71,12 @@ After running `./scripts/setup.sh --editors`:
 
 | IDE | Remaining steps |
 |---|---|
-| **VS Code** | Install the Continue extension. Turn off **Allow Anonymous Telemetry** in Continue and **Continue: Telemetry Enabled** in VS Code settings. |
+| **VS Code** (macOS) | Install the **ACP Client** extension (publisher formulahendry) and add the settings printed by setup to your user `settings.json`: the agent, `"acp.logTraffic": false` and `"telemetry.telemetryLevel": "off"`. This replaces Continue, which is no longer maintained; uninstall it. |
 | **Android Studio** | Open **Settings → Tools → AI → Model Providers**, add the **Local Provider** (port `8787`) or, on a server, the **Third-Party Remote Provider** printed by setup, click **Refresh**, enable the model, and pick it in the **Agent** tab on the right sidebar. The gateway removes its built-in web search (Gemini), so use Open WebUI for current information (see the IDE guide). The Continue JetBrains plugin is deprecated and can no longer be installed. |
 | **Android Studio agent** (preview, macOS, Android Studio 2026.2.2 Rabbit 2 or later) | Optional, in place of the Agent tab: it builds with Gradle after each change and fixes compile errors. Paste the JSON printed by setup under **Settings → Tools → AI → Agents → Add via JSON…**. |
 | **Xcode agent** | Open **Settings → Intelligence → Agents → Add an Agent**. Enter the executable, arguments, and environment values printed by setup, and leave **Interpreter** empty. |
 
-See [the IDE guide](docs/editors.md) for full instructions and Xcode's plain-chat option. The Xcode agent edits files, builds through Xcode and fixes the errors, searches Apple's documentation on your Mac, and can use Brave search (guarded) while the stack is up. Xcode asks "Allow acp-bridge to access Xcode?" once per launch and after each rebuild — allow it.
+See [the IDE guide](docs/editors.md) for full instructions and Xcode's plain-chat option. The agents in VS Code and Android Studio are the same `acp-bridge` with their own settings: they edit files, build the project after each change (Cargo, Gradle, Go, Swift, TypeScript) and fix the errors. The Xcode agent edits files, builds through Xcode and fixes the errors, searches Apple's documentation on your Mac, and can use Brave search (guarded) while the stack is up. Xcode asks "Allow acp-bridge to access Xcode?" once per launch and after each rebuild — allow it.
 
 ### 6. Check the stack
 
@@ -120,7 +121,7 @@ These commands do not start or stop Ollama. If startup fails, check `logs/openwe
   ```
   (a local copy of the official `https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh` installer — equivalent to piping that URL straight into bash, kept here so onboarding doesn't depend on fetching it fresh each time). Then add it to your shell (the installer prints the exact line; on Apple Silicon it's `eval "$(/opt/homebrew/bin/brew shellenv)"`, which needs to go in `~/.zprofile` to persist across terminal sessions).
 - **`uv` and Node.js** (Node provides `npx`, used to run the Brave MCP server): `brew install uv node`.
-- **Rust 1.86 or newer** (only for `--editors` on macOS, to build the Xcode agent): install it with rustup (https://rustup.rs) — `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` — then open a new terminal. If Rust is already installed, run `rustup update`.
+- **Rust 1.86 or newer** (only for `--editors` on macOS, to build the IDE agent for Xcode, Android Studio and VS Code): install it with rustup (https://rustup.rs) — `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` — then open a new terminal. If Rust is already installed, run `rustup update`.
 
 
 ## Re-running setup or refreshing IDE support
@@ -131,7 +132,7 @@ Run `./scripts/setup.sh` to apply setup again. To refresh IDE configuration, run
 ./scripts/setup.sh --editors
 ```
 
-The editor option rewrites the Continue configuration and secrets file only when they changed (backing up the old copies), and rebuilds the Xcode agent only when its pinned version, commit, or patch changed, or `bin/acp-bridge` was replaced (Xcode then asks to allow it again). Setup pulls a model only when it isn't installed and never re-checks Ollama's registry, so models change only when you pull one yourself; after `ollama pull gemma4:12b`, rebuild `coder-local` on it with `ollama create coder-local -f Modelfile.local`. When `OPEN_WEBUI_VERSION` in `.env` changes, setup rebuilds Open WebUI's venv and keeps `data/`; see [upgrading Open WebUI](docs/server.md#upgrade-open-webui). Review the terminal output for any remaining manual steps, especially Xcode registration. If you move this project folder, update Xcode's executable and arguments paths.
+The editor option rebuilds the IDE agent (`acp-bridge`) only when its pinned version, commit, or patch changed, or `bin/acp-bridge` was replaced (Xcode then asks to allow it again). Setup pulls a model only when it isn't installed and never re-checks Ollama's registry, so models change only when you pull one yourself; after `ollama pull gemma4:12b`, rebuild `coder-local` on it with `ollama create coder-local -f Modelfile.local`. When `OPEN_WEBUI_VERSION` in `.env` changes, setup rebuilds Open WebUI's venv and keeps `data/`; see [upgrading Open WebUI](docs/server.md#upgrade-open-webui). Review the terminal output for any remaining manual steps, especially Xcode registration. If you move this project folder, update the agent paths in Xcode, Android Studio and VS Code.
 
 ## Shared server setup
 
@@ -151,6 +152,6 @@ After `./scripts/setup.sh` has created `.venv/openwebui`:
 
 These tests use in-process fake inference responses, with no downloads or network calls.
 For live queue testing use the existing local Ollama model with `QUEUE_ACTIVE=1`.
-The Xcode agent uses `LLM_QUEUE=1` to show waiting/running status and reconnect to
-jobs. Continue receives standard streaming responses and keepalives; it does not
-currently display queue positions. See [editor limitations](docs/editors.md).
+The IDE agents use `LLM_QUEUE=1` to show waiting/running status and reconnect to
+jobs. Open WebUI and the IDEs' plain-chat providers receive standard streaming
+responses and keepalives; they don't display queue positions. See [editor limitations](docs/editors.md).
