@@ -34,6 +34,14 @@ def optional_int(env, name, default, minimum):
     return str(int(value))
 
 
+def kv_cache_type(env):
+    """OLLAMA_KV_CACHE_TYPE; '' means Ollama's own default (f16)."""
+    value = env.get('OLLAMA_KV_CACHE_TYPE', 'q8_0')
+    if value not in ('', 'f16', 'q8_0', 'q4_0'):
+        raise ValueError('OLLAMA_KV_CACHE_TYPE must be f16, q8_0, q4_0 or empty')
+    return value
+
+
 def positive(env, name, default):
     value = int(env.get(name, default))
     if value < 1:
@@ -71,6 +79,8 @@ class Settings:
     context: int
     ctx_checkpoints: str
     cache_ram: str
+    kv_cache_type: str
+    num_parallel: str
 
     @classmethod
     def read(cls, env=None):
@@ -101,9 +111,11 @@ class Settings:
                    positive(e, 'QUEUE_MAX_RESULT_BYTES', 4194304),
                    # Decoded inline-image bytes per chat request; 0 refuses images.
                    non_negative(e, 'QUEUE_MAX_IMAGE_BYTES', 16777216), model_context(mode),
-                   # llama-server's prompt-cache RAM, applied to Ollama by setup.sh.
+                   # llama-server's prompt-cache RAM, Ollama's KV cache type and
+                   # its slots per model, applied to Ollama by setup.sh.
                    optional_int(e, 'LLAMA_ARG_CTX_CHECKPOINTS', '4', 0),
-                   optional_int(e, 'LLAMA_ARG_CACHE_RAM', '1024', -1))
+                   optional_int(e, 'LLAMA_ARG_CACHE_RAM', '512', -1), kv_cache_type(e),
+                   optional_int(e, 'OLLAMA_NUM_PARALLEL', '2', 1))
 
     def shell(self):
         import shlex
@@ -111,6 +123,7 @@ class Settings:
                       INFERENCE_BASE_URL=self.upstream, GATEWAY_BASE_URL=self.gateway,
                       OLLAMA_BASE_URL=self.ollama, MODEL_CONTEXT=self.context,
                       LLAMA_ARG_CTX_CHECKPOINTS=self.ctx_checkpoints, LLAMA_ARG_CACHE_RAM=self.cache_ram,
+                      OLLAMA_KV_CACHE_TYPE=self.kv_cache_type, OLLAMA_NUM_PARALLEL=self.num_parallel,
                       EDITOR_TIMEOUT_MS=(self.wait_seconds + self.run_seconds + 60) * 1000)
         return '\n'.join(f'export {k}={shlex.quote(str(v))}' for k, v in values.items())
 

@@ -18,8 +18,8 @@ This repo is a self-hosted AI coding assistant stack (Ollama + inference gateway
 ## The three scripts
 
 ```
-./scripts/setup.sh [--editors]   # idempotent install/config, incl. the pinned Whisper model for voice input (data/whisper/), Ollama's llama-server cache limits (LLAMA_ARG_* in .env: launchctl + ~/Library/LaunchAgents/local-ai-harness.ollama-env.plist on macOS; prints the systemd steps on Linux); --editors prints the IDE registrations (Android Studio, Xcode, VS Code; nothing is written to editor settings) and, on macOS, builds bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
-./scripts/stack.sh up|down|status   # gateway + selected backend + Open WebUI + Brave MCP server (skipped if BRAVE_API_KEY is empty)
+./scripts/setup.sh [--editors]   # idempotent install/config, incl. the pinned Whisper model for voice input (data/whisper/), Ollama's memory settings (OLLAMA_KV_CACHE_TYPE, OLLAMA_NUM_PARALLEL and LLAMA_ARG_* in .env: launchctl + ~/Library/LaunchAgents/local-ai-harness.ollama-env.plist on macOS; prints the systemd steps on Linux); --editors prints the IDE registrations (Android Studio, Xcode, VS Code; nothing is written to editor settings) and, on macOS, builds bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
+./scripts/stack.sh up|down|status   # inference gateway + Open WebUI + Brave MCP server (skipped if BRAVE_API_KEY is empty); Ollama runs separately
 ./scripts/doctor.sh               # PASS/FAIL per check; exits non-zero on any failure
 ```
 

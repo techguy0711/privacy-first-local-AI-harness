@@ -115,6 +115,22 @@ start_openwebui() {
     # Spoken replies use the browser's own voices (docs/privacy.md).
     export AUDIO_STT_ENGINE='' WHISPER_MODEL="$WHISPER_DIR" WHISPER_VAD_FILTER=false
     export AUDIO_TTS_ENGINE=''
+    # One utterance per paragraph: per sentence (the default, "punctuation")
+    # paused after every sentence while the reply was still being written.
+    export AUDIO_TTS_SPLIT_ON=paragraphs
+    # Titles and tags without thinking: gemma4 thinks by default, and each of
+    # these took 1-2 minutes and evicted the chat from the model's cache.
+    # TASK_MODEL_PARAMS reaches only Open WebUI's task calls, so chat replies
+    # keep thinking; the gateway passes reasoning_effort on to Ollama, where
+    # "none" turns thinking off.
+    export TASK_MODEL_PARAMS='{"reasoning_effort":"none"}'
+    # No suggestions: no starter prompts on a new chat (an empty list; unset
+    # shows Open WebUI's built-in ones), no suggested next messages after each
+    # reply (the server then skips that model call), and no completion of
+    # what's being typed (already off by default).
+    export DEFAULT_PROMPT_SUGGESTIONS='[]'
+    export ENABLE_FOLLOW_UP_GENERATION=false
+    export ENABLE_AUTOCOMPLETE_GENERATION=false
     export OFFLINE_MODE=true
     export HF_HUB_OFFLINE=1
     export ENABLE_VERSION_UPDATE_CHECK=false

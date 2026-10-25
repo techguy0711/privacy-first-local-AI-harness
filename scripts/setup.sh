@@ -24,6 +24,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
+# setup.sh also puts Ollama's memory settings in the login environment
+# (launchctl), so a shell started since then inherits the values last applied;
+# only .env or the defaults in services/config.py may decide them.
+unset OLLAMA_KV_CACHE_TYPE OLLAMA_NUM_PARALLEL LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
@@ -151,14 +155,18 @@ else:
     print("  Linux: sudo systemctl restart ollama")
 PYEOF
 
-# ---------- 2b. Cap Ollama's prompt-cache RAM ----------
+# ---------- 2b. Ollama's memory settings ----------
 # Ollama runs models through llama-server, which by default keeps up to 32
 # context checkpoints per conversation and an 8 GiB prompt cache in RAM. On a
 # 16 GB Mac that reached 6.9 GiB and pushed it deep into swap (2026-10-17).
 # llama-server reads LLAMA_ARG_* from its environment, which it inherits from
-# Ollama. Values come from .env via runtime.sh; empty leaves llama-server's own.
+# Ollama. OLLAMA_KV_CACHE_TYPE and OLLAMA_NUM_PARALLEL are Ollama's own (FAQ):
+# q8_0 halves the KV cache and its checkpoints; a second slot keeps a
+# conversation's cache while Open WebUI's background tasks run in the other
+# (docs/server.md). Values come from .env via runtime.sh; empty leaves the
+# tool's own default.
 OLLAMA_CACHE_ENV=()
-for var in LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM; do
+for var in OLLAMA_KV_CACHE_TYPE OLLAMA_NUM_PARALLEL LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM; do
   if [[ -n "${!var}" ]]; then OLLAMA_CACHE_ENV+=("$var=${!var}"); fi
 done
 if [[ ${#OLLAMA_CACHE_ENV[@]} -gt 0 && "$(uname -s)" == "Darwin" ]]; then
@@ -197,9 +205,9 @@ EOF
     if [[ " $running " != *" $kv "* ]]; then pending=true; fi
   done
   if $pending; then
-    log "Ollama prompt-cache limits set (${OLLAMA_CACHE_ENV[*]}). Quit and reopen the Ollama app to apply them."
+    log "Ollama memory settings set (${OLLAMA_CACHE_ENV[*]}). Quit and reopen the Ollama app to apply them."
   else
-    log "Ollama prompt-cache limits already applied (${OLLAMA_CACHE_ENV[*]})"
+    log "Ollama memory settings already applied (${OLLAMA_CACHE_ENV[*]})"
   fi
 elif [[ "$(uname -s)" != "Darwin" ]]; then
   # The Linux service runs as the `ollama` user, whose home is not this
@@ -212,7 +220,7 @@ elif [[ "$(uname -s)" != "Darwin" ]]; then
     if [[ " ${current#Environment=} " != *" $kv "* ]]; then missing+=("$kv"); fi
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
-    log "The ollama service lacks ${missing[*]} (Ollama Cloud off, prompt-cache limits). Add them (needs sudo):"
+    log "The ollama service lacks ${missing[*]} (Ollama Cloud off, memory settings). Add them (needs sudo):"
     echo "  sudo systemctl edit ollama.service    # then under [Service]:"
     for kv in "${missing[@]}"; do echo "    Environment=\"$kv\""; done
     echo "  sudo systemctl daemon-reload && sudo systemctl restart ollama"

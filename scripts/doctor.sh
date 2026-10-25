@@ -13,6 +13,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   echo "ERROR: .env not found. Run: cp .env.example .env" >&2
   exit 1
 fi
+# setup.sh also puts Ollama's memory settings in the login environment
+# (launchctl), so a shell started since then inherits the values last applied;
+# only .env or the defaults in services/config.py may decide them.
+unset OLLAMA_KV_CACHE_TYPE OLLAMA_NUM_PARALLEL LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
@@ -85,8 +89,8 @@ check_ollama() {
 check_ollama_cache_limits() {
   # setup.sh puts these in Ollama's environment; llama-server only sees them
   # once Ollama has been restarted, so check the running server, not launchctl.
-  local want=() var kv current pid missing=() name="Ollama prompt-cache limits applied"
-  for var in LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM; do
+  local want=() var kv current pid missing=() name="Ollama memory settings applied"
+  for var in OLLAMA_KV_CACHE_TYPE OLLAMA_NUM_PARALLEL LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM; do
     if [[ -n "${!var}" ]]; then want+=("$var=${!var}"); fi
   done
   if [[ ${#want[@]} -eq 0 ]]; then
@@ -275,6 +279,28 @@ check_openwebui() {
     pass "Open WebUI responds on $WEBUI_HOST:$WEBUI_PORT"
   else
     fail "Open WebUI responds on $WEBUI_HOST:$WEBUI_PORT" "no response (run ./scripts/stack.sh up)"
+  fi
+}
+
+check_openwebui_tasks() {
+  # stack.sh's settings for Open WebUI's own model calls, read from the running
+  # process (they only apply after a restart): titles and tags without
+  # thinking, no suggestions, and speech one paragraph at a time.
+  local pid current kv missing=() name="Open WebUI background tasks without thinking, no suggestions, speech by paragraph"
+  pid="$(cat "$RUN_DIR/openwebui.pid" 2>/dev/null)"
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    skip "$name" "Open WebUI not running"
+    return
+  fi
+  current="$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n')"
+  for kv in 'TASK_MODEL_PARAMS={"reasoning_effort":"none"}' 'DEFAULT_PROMPT_SUGGESTIONS=[]' \
+    'ENABLE_FOLLOW_UP_GENERATION=false' 'ENABLE_AUTOCOMPLETE_GENERATION=false' 'AUDIO_TTS_SPLIT_ON=paragraphs'; do
+    grep -qxF -- "$kv" <<<"$current" || missing+=("$kv")
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    pass "$name"
+  else
+    fail "$name" "Open WebUI is running without ${missing[*]} -- restart the stack: ./scripts/stack.sh down && ./scripts/stack.sh up"
   fi
 }
 
@@ -525,6 +551,7 @@ check_model_built
 check_gateway
 check_chat_completion
 check_openwebui
+check_openwebui_tasks
 check_brave
 check_acp_web_search_url
 check_localhost_binding

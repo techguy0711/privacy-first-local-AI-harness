@@ -96,6 +96,14 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.app.state.queue.jobs[jid].state == 'completed')
         self.assertNotIn('temperature', self.calls[-1][1])
 
+    async def test_reasoning_effort_reaches_ollama(self):
+        # Open WebUI's background tasks send reasoning_effort "none" (stack.sh's
+        # TASK_MODEL_PARAMS); Ollama turns thinking off for them.
+        jid = (await self.submit({**BODY, 'reasoning_effort': 'none', 'think': True})).json()['id']
+        await self.wait_for(lambda: self.app.state.queue.jobs[jid].state == 'completed')
+        self.assertEqual(self.calls[-1][1]['reasoning_effort'], 'none')
+        self.assertNotIn('think', self.calls[-1][1])
+
     async def test_non_brave_web_search_tools_removed(self):
         def tool(name, description=''):
             return {'type': 'function', 'function': {'name': name, 'description': description}}
@@ -322,12 +330,19 @@ class ConfigTests(unittest.TestCase):
         cfg = Settings.read({'LLAMA_ARG_CACHE_RAM': '-1'})
         self.assertEqual((cfg.ctx_checkpoints, cfg.cache_ram), ('4', '-1'))
         self.assertEqual(Settings.read({'LLAMA_ARG_CTX_CHECKPOINTS': ''}).ctx_checkpoints, '')
+        self.assertEqual(Settings.read({}).kv_cache_type, 'q8_0')
+        self.assertEqual(Settings.read({'OLLAMA_KV_CACHE_TYPE': ''}).kv_cache_type, '')
+        self.assertEqual((Settings.read({}).num_parallel, Settings.read({}).cache_ram), ('2', '512'))
+        self.assertIn('OLLAMA_NUM_PARALLEL=4', Settings.read({'OLLAMA_NUM_PARALLEL': '4'}).shell())
+        self.assertEqual(Settings.read({'OLLAMA_NUM_PARALLEL': ''}).num_parallel, '')
+        self.assertIn("OLLAMA_KV_CACHE_TYPE=f16", Settings.read({'OLLAMA_KV_CACHE_TYPE': 'f16'}).shell())
         self.assertEqual(Settings.read({}).max_image, 16777216)
         self.assertEqual(Settings.read({'QUEUE_MAX_IMAGE_BYTES': '0'}).max_image, 0)
         for env in ({'MODE': 'oops'}, {'INFERENCE_BACKEND': 'other'}, {'QUEUE_ACTIVE': '0'}, {'QUEUE_MAX_IMAGE_BYTES': '-1'},
                     {'WEBUI_HOST': '0.0.0.0'}, {'OLLAMA_BASE_URL': 'https://external.test'},
                     {'EMBED_MODEL': 'other'}, {'INFERENCE_BACKEND': 'unsupported'},
-                    {'LLAMA_ARG_CTX_CHECKPOINTS': '-1'}, {'LLAMA_ARG_CACHE_RAM': '1g'}):
+                    {'LLAMA_ARG_CTX_CHECKPOINTS': '-1'}, {'LLAMA_ARG_CACHE_RAM': '1g'},
+                    {'OLLAMA_KV_CACHE_TYPE': 'q5_1'}, {'OLLAMA_NUM_PARALLEL': '0'}):
             with self.assertRaises(ValueError):
                 Settings.read(env)
 
