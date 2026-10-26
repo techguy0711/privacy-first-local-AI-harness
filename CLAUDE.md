@@ -2,6 +2,8 @@
 
 This repo is a self-hosted AI coding assistant stack (Ollama + inference gateway + Open WebUI + Brave MCP + acp-bridge agents for Xcode, Android Studio and VS Code), switchable between a local Mac and a shared server via `MODE` in `.env`. The rules below are non-negotiable for any future work here.
 
+Start with `docs/architecture.md` (what runs, how configuration flows, where each rule below is enforced, which files a common change touches), then read only the code the task needs. A change to a component, port, file's role, configuration flow or enforcement point updates that doc in the same change.
+
 ## Hard rules
 
 1. **Model allowlist.** Only these models may be pulled, configured, or suggested anywhere (chat, embeddings, reranking, autocomplete, speech):
@@ -18,11 +20,11 @@ This repo is a self-hosted AI coding assistant stack (Ollama + inference gateway
 ## The three scripts
 
 ```
-./scripts/setup.sh [--editors]   # idempotent install/config, incl. the pinned Whisper model for voice input (data/whisper/), Ollama's memory settings (OLLAMA_KV_CACHE_TYPE, OLLAMA_NUM_PARALLEL and LLAMA_ARG_* in .env: launchctl + ~/Library/LaunchAgents/local-ai-harness.ollama-env.plist on macOS; prints the systemd steps on Linux), the Brave MCP server from services/brave-mcp/package-lock.json into build/brave-mcp/ (only with BRAVE_API_KEY; npm ci, no install scripts), deletion of faster-whisper's bundled Silero VAD model (not on the allowlist), and build/sbom.cdx.json (CycloneDX, scripts/sbom.py); --editors prints the IDE registrations (Android Studio, Xcode, VS Code; nothing is written to editor settings) and, on macOS, builds bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
+./scripts/setup.sh [--editors]   # idempotent install/config, incl. the pinned Whisper model for voice input (data/whisper/), Ollama's memory settings (OLLAMA_KV_CACHE_TYPE, OLLAMA_NUM_PARALLEL and LLAMA_ARG_*; defaults in services/config.py, overridable in .env: launchctl + ~/Library/LaunchAgents/local-ai-harness.ollama-env.plist on macOS; prints the systemd steps on Linux), the Brave MCP server from services/brave-mcp/package-lock.json into build/brave-mcp/ (only with BRAVE_API_KEY; npm ci, no install scripts), deletion of faster-whisper's bundled Silero VAD model (not on the allowlist), and build/sbom.cdx.json (CycloneDX, scripts/sbom.py); --editors prints the IDE registrations (Android Studio, Xcode, VS Code; nothing is written to editor settings) and, on macOS, builds bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
 ./scripts/stack.sh up|down|status   # inference gateway + Open WebUI + Brave MCP server (skipped if BRAVE_API_KEY is empty); Ollama runs separately; MODE=server adds audit logs, 12-hour logins, 15-character passwords and HTTPS-only cookies unless .env overrides them (docs/compliance.md)
 ./scripts/doctor.sh               # PASS/FAIL per check; exits non-zero on any failure
 ```
 
-Re-running `setup.sh` must change nothing on a second run. Changing `MODE` in `.env` must switch the model everywhere with no code changes.
+Re-running `setup.sh` must change nothing on a second run. Changing `MODE` in `.env` must switch the model everywhere with no code changes. `.env` holds only per-machine settings and secrets: version pins live in `scripts/runtime.sh` (Brave's in its lockfile), and values the hard rules fix (loopback hosts, the embedding model) are constants in `services/config.py`.
 
 `server-test/` runs `MODE=server` on a Mac for testing: a Debian container that runs these scripts as a server administrator would, behind Caddy on https://localhost:8443/, with Ollama on the Mac and `coder-server` built on `llama3.1:8b` (`server-test/Modelfile.server`). It is not a deployment method; see `docs/server.md`, "Test server mode on a Mac".

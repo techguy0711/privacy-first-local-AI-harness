@@ -22,14 +22,12 @@ case "${MODE:-}" in
 esac
 
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
-EMBED_MODEL="${EMBED_MODEL:-nomic-embed-text}"
-WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"
 WEBUI_PORT="${WEBUI_PORT:-3000}"
-BRAVE_MCP_HOST="${BRAVE_MCP_HOST:-127.0.0.1}"
 BRAVE_MCP_PORT="${BRAVE_MCP_PORT:-8765}"
-BRAVE_MCP_VERSION="${BRAVE_MCP_VERSION:-}"
 BRAVE_MCP_ENABLED_TOOLS="${BRAVE_MCP_ENABLED_TOOLS:-brave_web_search brave_news_search}"
 
+# Also sets WEBUI_HOST, BRAVE_MCP_HOST (always 127.0.0.1) and EMBED_MODEL,
+# which are fixed in services/config.py, not settings.
 source "$REPO_ROOT/scripts/runtime.sh"
 
 RUN_DIR="$REPO_ROOT/run"

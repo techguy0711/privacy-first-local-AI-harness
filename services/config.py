@@ -6,6 +6,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
+# Fixed by the hard rules, so not settings: internal services on loopback only
+# (rule 4) and the one allowlisted embedding model (rule 1). An older .env may
+# still name them; any other value is refused.
+LOOPBACK = '127.0.0.1'
+EMBED_MODEL = 'nomic-embed-text'
 
 
 def loopback_url(value):
@@ -96,10 +101,10 @@ class Settings:
         upstream = ollama + '/v1'
         if urlparse(upstream).path != '/v1':
             raise ValueError('Inference URL must end with /v1')
-        if e.get('EMBED_MODEL', 'nomic-embed-text') != 'nomic-embed-text':
+        if e.get('EMBED_MODEL', EMBED_MODEL) != EMBED_MODEL:
             raise ValueError('Only nomic-embed-text is supported for embeddings')
         for name in ('WEBUI_HOST', 'BRAVE_MCP_HOST'):
-            if e.get(name, '127.0.0.1') != '127.0.0.1':
+            if e.get(name, LOOPBACK) != LOOPBACK:
                 raise ValueError(f'{name} must remain 127.0.0.1; use the private TLS proxy')
         # Metadata audit trail (who, when, what, outcome; never content), on by
         # default for a shared server.
@@ -128,7 +133,8 @@ class Settings:
         import shlex
         values = dict(INFERENCE_BACKEND=self.backend, CHAT_MODEL=self.model,
                       INFERENCE_BASE_URL=self.upstream, GATEWAY_BASE_URL=self.gateway,
-                      OLLAMA_BASE_URL=self.ollama, MODEL_CONTEXT=self.context,
+                      OLLAMA_BASE_URL=self.ollama, EMBED_MODEL=EMBED_MODEL,
+                      WEBUI_HOST=LOOPBACK, BRAVE_MCP_HOST=LOOPBACK, MODEL_CONTEXT=self.context,
                       LLAMA_ARG_CTX_CHECKPOINTS=self.ctx_checkpoints, LLAMA_ARG_CACHE_RAM=self.cache_ram,
                       OLLAMA_KV_CACHE_TYPE=self.kv_cache_type, OLLAMA_NUM_PARALLEL=self.num_parallel,
                       EDITOR_TIMEOUT_MS=(self.wait_seconds + self.run_seconds + 60) * 1000)

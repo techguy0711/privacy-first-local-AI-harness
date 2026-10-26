@@ -28,10 +28,10 @@ case "${MODE:-}" in
 esac
 
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
-WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"
 WEBUI_PORT="${WEBUI_PORT:-3000}"
-BRAVE_MCP_HOST="${BRAVE_MCP_HOST:-127.0.0.1}"
 BRAVE_MCP_PORT="${BRAVE_MCP_PORT:-8765}"
+# Also sets WEBUI_HOST, BRAVE_MCP_HOST (always 127.0.0.1), EMBED_MODEL and the
+# version pins.
 source "$REPO_ROOT/scripts/runtime.sh"
 RUN_DIR="$REPO_ROOT/run"
 
@@ -94,7 +94,7 @@ check_ollama_cache_limits() {
     if [[ -n "${!var}" ]]; then want+=("$var=${!var}"); fi
   done
   if [[ ${#want[@]} -eq 0 ]]; then
-    skip "$name" "not set in .env"
+    skip "$name" "all set empty in .env (each tool's own default)"
     return
   fi
   name="$name (${want[*]})"
@@ -214,18 +214,18 @@ PYEOF
   fi
 }
 
-check_pins_match_example() {
-  # stack.sh and the gateway are verified against the pins in .env.example;
-  # .env is authoritative, so one copied earlier keeps the old versions.
-  local var want drift=()
-  for var in OPEN_WEBUI_VERSION BRAVE_MCP_VERSION ACP_BRIDGE_VERSION ACP_BRIDGE_COMMIT; do
-    want="$(sed -n "s/^$var=\([^[:space:]#]*\).*/\1/p" "$REPO_ROOT/.env.example" | head -1)"
-    if [[ -n "$want" && "${!var:-}" != "$want" ]]; then drift+=("$var=${!var:-<unset>} (.env.example: $want)"); fi
+check_env_retired() {
+  # The version pins moved to scripts/runtime.sh (Brave's is its lockfile) and
+  # the one-value settings to services/config.py. A .env copied before that
+  # still has their lines, which change nothing now.
+  local var old=()
+  for var in OPEN_WEBUI_VERSION BRAVE_MCP_VERSION ACP_BRIDGE_VERSION ACP_BRIDGE_COMMIT EMBED_MODEL WEBUI_HOST BRAVE_MCP_HOST; do
+    if grep -q "^$var=" "$ENV_FILE"; then old+=("$var"); fi
   done
-  if [[ ${#drift[@]} -eq 0 ]]; then
-    pass "Version pins in .env match .env.example"
+  if [[ ${#old[@]} -eq 0 ]]; then
+    pass "No retired settings in .env"
   else
-    warn "Version pins in .env match .env.example" "${drift[*]} -- copy them into .env, then run ./scripts/setup.sh"
+    warn "No retired settings in .env" "${old[*]} -- no longer settings (pins are in scripts/runtime.sh, the rest is fixed); delete these lines"
   fi
 }
 
@@ -498,11 +498,7 @@ check_acp_bridge() {
     skip "acp-bridge built (ACP agents)" "not installed (optional; run ./scripts/setup.sh --editors)"
     return
   fi
-  local name="acp-bridge built from pinned v${ACP_BRIDGE_VERSION:-<unset>} + editors/acp/acp-bridge.patch"
-  if [[ -z "${ACP_BRIDGE_VERSION:-}" || -z "${ACP_BRIDGE_COMMIT:-}" ]]; then
-    fail "$name" "ACP_BRIDGE_VERSION/ACP_BRIDGE_COMMIT missing in .env (copy both from .env.example)"
-    return
-  fi
+  local name="acp-bridge built from pinned v$ACP_BRIDGE_VERSION + editors/acp/acp-bridge.patch"
   if [[ ! -f "$patch" ]]; then
     fail "$name" "editors/acp/acp-bridge.patch is missing from the repo -- restore it (e.g. git checkout -- editors/acp/acp-bridge.patch)"
     return
@@ -517,7 +513,7 @@ check_acp_bridge() {
   elif [[ "$got" == "$inputs" ]]; then
     fail "$name" "bin/acp-bridge.stamp is from an older setup.sh (no binary hash) -- run ./scripts/setup.sh --editors"
   elif [[ "$got" != "$inputs "* ]]; then
-    fail "$name" "bin/acp-bridge.stamp does not match .env pins + patch (built from something else) -- run ./scripts/setup.sh --editors"
+    fail "$name" "bin/acp-bridge.stamp does not match the pins in scripts/runtime.sh + patch (built from something else) -- run ./scripts/setup.sh --editors"
   elif [[ "$got" != "$inputs bin_sha256=$bin_sha" ]]; then
     fail "$name" "bin/acp-bridge is not the binary setup.sh built (sha256 differs from the stamp) -- run ./scripts/setup.sh --editors"
   elif [[ "$installed_version" != "$ACP_BRIDGE_VERSION" ]]; then
@@ -607,7 +603,7 @@ check_webui_ocr_models
 check_webui_vad_model
 check_whisper_model
 check_voice_cleanup
-check_pins_match_example
+check_env_retired
 check_model_built
 check_gateway
 check_chat_completion

@@ -13,7 +13,6 @@ For a new installation, copy `.env.example` to `.env`. Preserve the existing fil
 ```dotenv
 MODE=server
 SERVER_HOST=ai.internal.example
-QUEUE_ACTIVE=1
 ```
 
 Then run:
@@ -22,7 +21,7 @@ Then run:
 ./scripts/setup.sh --editors
 ```
 
-Setup prepares the approved Ollama chat model, Nomic embeddings, the Whisper model for Open WebUI's voice input, the gateway, and editor configuration. Increase concurrency only after measuring the workload on the intended hardware.
+Setup prepares the approved Ollama chat model, Nomic embeddings, the Whisper model for Open WebUI's voice input, the gateway, and editor configuration. Increase concurrency (`QUEUE_ACTIVE`, 1 by default) only after measuring the workload on the intended hardware.
 
 ## 2. Start and verify
 
@@ -33,7 +32,7 @@ Setup prepares the approved Ollama chat model, Nomic embeddings, the Whisper mod
 
 Ollama runs separately through its app or service. The stack script manages the gateway, Open WebUI, and optional Brave MCP server. Their logs are under `logs/`.
 
-On Linux, `setup.sh` prints the `systemctl edit ollama.service` lines that give the Ollama service its memory settings (`OLLAMA_KV_CACHE_TYPE`, `OLLAMA_NUM_PARALLEL`, `LLAMA_ARG_CTX_CHECKPOINTS`, `LLAMA_ARG_CACHE_RAM` in `.env`), and `doctor.sh` checks the service has them. On a server with spare RAM and several users, raise `LLAMA_ARG_CACHE_RAM` so more conversations stay cached between turns.
+On Linux, `setup.sh` prints the `systemctl edit ollama.service` lines that give the Ollama service its memory settings (`OLLAMA_KV_CACHE_TYPE`, `OLLAMA_NUM_PARALLEL`, `LLAMA_ARG_CTX_CHECKPOINTS`, `LLAMA_ARG_CACHE_RAM`; defaults in `services/config.py`, overridable in `.env`), and `doctor.sh` checks the service has them. On a server with spare RAM and several users, raise `LLAMA_ARG_CACHE_RAM` so more conversations stay cached between turns.
 
 ## 3. Configure private HTTPS access
 
@@ -168,7 +167,7 @@ Restart after changing `.env`. The launcher rejects configuration changes while 
 
 ### Upgrade Open WebUI
 
-`.env` is authoritative, so a new pin in `.env.example` reaches an existing install only when you copy it (`doctor.sh` warns while they differ). Stop the stack, back up `data/openwebui` (its database migrations can't be undone), set `OPEN_WEBUI_VERSION` in `.env`, run `./scripts/setup.sh` (it rebuilds the venv; `data/` is kept), and start the stack, which migrates the database.
+The pin is `OPEN_WEBUI_VERSION` in `scripts/runtime.sh`, so it arrives with a `git pull`, together with the changes verified against it. Before running setup after a pull that changes it: stop the stack and back up `data/openwebui` (its database migrations can't be undone). Then run `./scripts/setup.sh` (it rebuilds the venv; `data/` is kept), and start the stack, which migrates the database.
 
 ### Change deployment mode
 
@@ -190,7 +189,7 @@ These tests use simulated inference responses and require no model downloads.
 
 ## Configuration reference
 
-Edit settings in `.env`; [.env.example](../.env.example) contains the complete list.
+Edit settings in `.env`. [.env.example](../.env.example) lists every one; the tuning settings below are commented out at their defaults, so uncomment a line to override it. Version pins are not settings: they are in `scripts/runtime.sh` and `services/brave-mcp/package-lock.json`.
 
 | Setting | Default | Purpose |
 |---|---|---|
@@ -252,6 +251,7 @@ Supply a stable `Idempotency-Key` when submitting a job. Within its retention pe
 
 ## Related documentation
 
+- [Architecture: how the components and scripts connect](architecture.md)
 - [Editor configuration](editors.md)
 - [Privacy and outbound traffic](privacy.md)
 - [Compliance notes for regulated environments](compliance.md)

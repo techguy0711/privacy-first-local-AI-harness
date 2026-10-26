@@ -72,7 +72,7 @@ What the stack provides toward each control. The organization's own controls (po
 | AC-12 Session termination | 12-hour logins in server mode. |
 | AU-2, AU-3, AU-12 Event logging | The two audit logs above. |
 | AU-9, AU-11 Audit protection and retention | Logs are owner-only and never deleted by the stack; retention is the organization's. |
-| CM-2, CM-6 Baseline and settings | `.env` is authoritative (`ENABLE_PERSISTENT_CONFIG=false`), version pins are compared with `.env.example`, and `doctor.sh` checks the settings. |
+| CM-2, CM-6 Baseline and settings | `.env` is authoritative (`ENABLE_PERSISTENT_CONFIG=false`), version pins are tracked in git (`scripts/runtime.sh`, `services/brave-mcp/package-lock.json`), and `doctor.sh` checks the settings. |
 | CM-7 Least functionality | Telemetry, update checks, community sharing, user webhooks, suggestions, autocomplete and Open WebUI's own web search are off. |
 | CM-8 Component inventory | `build/sbom.cdx.json`. |
 | CM-10, CM-11 Software usage | Model allowlist, enforced by the gateway and `doctor.sh`. |

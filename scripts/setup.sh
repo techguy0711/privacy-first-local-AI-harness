@@ -44,18 +44,15 @@ esac
 source "$REPO_ROOT/scripts/runtime.sh"
 
 
-# --editors on macOS builds acp-bridge from a pinned upstream commit (step 8).
-# Everything that would stop that build is checked up front -- an older .env,
-# a missing patch, no Rust -- so it fails before the model pulls, not after.
-# bin/acp-bridge.stamp records the pins, the patch hash and the installed
-# binary's hash; a full match (and a binary that runs) skips the rebuild,
-# which also keeps Xcode from asking "Allow acp-bridge to access Xcode?" again.
+# --editors on macOS builds acp-bridge from a pinned upstream commit (step 8;
+# pins in runtime.sh). Everything that would stop that build is checked up
+# front -- a missing patch, no Rust -- so it fails before the model pulls, not
+# after. bin/acp-bridge.stamp records the pins, the patch hash and the
+# installed binary's hash; a full match (and a binary that runs) skips the
+# rebuild, which also keeps Xcode from asking "Allow acp-bridge to access
+# Xcode?" again.
 ACP_BUILD_NEEDED=false
 if $INSTALL_EDITORS && [[ "$(uname -s)" == "Darwin" ]]; then
-  if [[ -z "${ACP_BRIDGE_VERSION:-}" || -z "${ACP_BRIDGE_COMMIT:-}" ]]; then
-    err "ACP_BRIDGE_VERSION and ACP_BRIDGE_COMMIT must both be set in .env for --editors (acp-bridge is built from that pinned commit) -- copy both lines from .env.example."
-    exit 1
-  fi
   ACP_BIN="$REPO_ROOT/bin/acp-bridge"
   ACP_STAMP="$REPO_ROOT/bin/acp-bridge.stamp"
   ACP_PATCH="$REPO_ROOT/editors/acp/acp-bridge.patch"
@@ -88,7 +85,6 @@ EOF
 fi
 
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
-EMBED_MODEL="${EMBED_MODEL:-nomic-embed-text}"
 
 # ---------- 1. Ollama presence/reachability ----------
 if ! command -v ollama >/dev/null 2>&1; then
@@ -163,8 +159,8 @@ PYEOF
 # Ollama. OLLAMA_KV_CACHE_TYPE and OLLAMA_NUM_PARALLEL are Ollama's own (FAQ):
 # q8_0 halves the KV cache and its checkpoints; a second slot keeps a
 # conversation's cache while Open WebUI's background tasks run in the other
-# (docs/server.md). Values come from .env via runtime.sh; empty leaves the
-# tool's own default.
+# (docs/server.md). Values come from .env, or the defaults in
+# services/config.py, via runtime.sh; empty leaves the tool's own default.
 OLLAMA_CACHE_ENV=()
 for var in OLLAMA_KV_CACHE_TYPE OLLAMA_NUM_PARALLEL LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM; do
   if [[ -n "${!var}" ]]; then OLLAMA_CACHE_ENV+=("$var=${!var}"); fi
@@ -270,11 +266,6 @@ EOF
   exit 1
 fi
 
-if [[ -z "${OPEN_WEBUI_VERSION:-}" ]]; then
-  err "OPEN_WEBUI_VERSION is empty in .env -- set a pinned version (e.g. 0.6.31)."
-  exit 1
-fi
-
 VENV_DIR="$REPO_ROOT/.venv/openwebui"
 # venvs hardcode their absolute path, so one copied or moved from another
 # folder/machine exists but can't run -- rebuild it (DATA_DIR lives outside it).
@@ -351,11 +342,8 @@ if [[ -n "${BRAVE_API_KEY:-}" ]]; then
     echo "Install it yourself (brew install node), or leave BRAVE_API_KEY empty to skip web search, then re-run." >&2
     exit 1
   fi
+  # The lockfile is the pin: an upgrade changes it, nothing else.
   BRAVE_PINNED="$(node -p "require(process.argv[1]).packages['node_modules/@brave/brave-search-mcp-server'].version" "$BRAVE_LOCK")"
-  if [[ "$BRAVE_PINNED" != "${BRAVE_MCP_VERSION:-}" ]]; then
-    err "BRAVE_MCP_VERSION=${BRAVE_MCP_VERSION:-<unset>} in .env, but services/brave-mcp/package-lock.json pins $BRAVE_PINNED -- set BRAVE_MCP_VERSION=$BRAVE_PINNED in .env (an upgrade changes the lockfile)."
-    exit 1
-  fi
   BRAVE_STAMP="lock_sha256=$(shasum -a 256 "$BRAVE_LOCK" | awk '{print $1}')"
   if [[ "$(cat "$BRAVE_DIR/.stamp" 2>/dev/null || true)" == "$BRAVE_STAMP" \
     && -f "$BRAVE_DIR/node_modules/@brave/brave-search-mcp-server/dist/index.js" ]]; then
@@ -522,7 +510,7 @@ Settings > Intelligence > Model Context Protocol. If this repo is in a protected
 folder (e.g. ~/Downloads), macOS may also ask whether acp-bridge may access it --
 allow that too, or the agent cannot read this repo.
 Web search needs the local Brave server: set BRAVE_API_KEY in .env and run
-./scripts/stack.sh up (http://${BRAVE_MCP_HOST:-127.0.0.1}:${BRAVE_MCP_PORT:-8765}/mcp); without it the agent has no web search.
+./scripts/stack.sh up (http://$BRAVE_MCP_HOST:${BRAVE_MCP_PORT:-8765}/mcp); without it the agent has no web search.
 Saved agent conversations: $REPO_ROOT/data/acp-bridge/
 See docs/editors.md for details.
 EOF

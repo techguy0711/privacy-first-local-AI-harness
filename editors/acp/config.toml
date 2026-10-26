@@ -98,8 +98,8 @@ expose = ["DocumentationSearch"]
 call_timeout_secs = 900
 
 # The Brave server ./scripts/stack.sh up starts (it holds BRAVE_API_KEY;
-# acp-bridge has none). The url must match BRAVE_MCP_HOST/BRAVE_MCP_PORT in
-# .env (doctor.sh checks). In MODE=server, or while the stack is down, it does
+# acp-bridge has none). The url must be 127.0.0.1 and BRAVE_MCP_PORT in .env
+# (doctor.sh checks). In MODE=server, or while the stack is down, it does
 # not answer and the model simply has no web_search. Queries pass a privacy
 # guard in code (no code, paths, file or project names); at most 3 searches
 # per turn and 20 per conversation (fixed in acp-bridge).

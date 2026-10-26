@@ -14,4 +14,4 @@ Out of scope here, report upstream instead: vulnerabilities in Ollama, Open WebU
 
 ## Supported versions
 
-Only the latest commit on `main` is supported. The pinned upstream versions are in `.env.example`, and `build/sbom.cdx.json` (written by `./scripts/setup.sh`) lists every installed component and its version.
+Only the latest commit on `main` is supported. The pinned upstream versions are in `scripts/runtime.sh` (Open WebUI, acp-bridge, Whisper) and `services/brave-mcp/package-lock.json`, and `build/sbom.cdx.json` (written by `./scripts/setup.sh`) lists every installed component and its version.

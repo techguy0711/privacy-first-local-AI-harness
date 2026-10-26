@@ -5,6 +5,22 @@ eval "$RUNTIME_CONFIG"
 unset RUNTIME_CONFIG
 export OLLAMA_HOST="$OLLAMA_BASE_URL"
 
+# Upstream versions this repo is built and verified against. They live here,
+# not in .env, so a git pull brings each one with the code that depends on it;
+# a line for one left in an older .env is overridden (doctor.sh warns). The
+# Brave MCP server is pinned by services/brave-mcp/package-lock.json.
+# Open WebUI: stack.sh and the gateway are verified against this version, and
+# setup.sh rebuilds the venv when it changes (data/ is kept).
+OPEN_WEBUI_VERSION=0.12.3
+# acp-bridge (the Xcode, Android Studio and VS Code agents, macOS only), a
+# minimal Rust ACP<->local-model adapter, used instead of larger agent CLIs
+# that phone home even with telemetry disabled (see docs/privacy.md). setup.sh
+# --editors builds it from this tag, refuses to build unless the tag is this
+# exact commit, and applies editors/acp/acp-bridge.patch + queue.patch (needs
+# Rust: https://rustup.rs).
+ACP_BRIDGE_VERSION=0.9.2
+ACP_BRIDGE_COMMIT=abadae136c6cab4ae085c050675b16e4599ca676
+
 # Speech-to-text for Open WebUI's voice input: OpenAI's Whisper small (MIT) in
 # SYSTRAN's CTranslate2 build, pinned to a Hugging Face commit and to each
 # file's SHA-256 (approved 2026-10-24). setup.sh downloads it once; Open WebUI

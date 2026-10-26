@@ -75,7 +75,7 @@ client_servers = "off"
 connect_timeout_secs = 30
 web_search = true
 
-# Same Brave server as config.toml; the url must match BRAVE_MCP_HOST /
+# Same Brave server as config.toml; the url must be 127.0.0.1 and
 # BRAVE_MCP_PORT in .env (doctor.sh checks both files).
 [[mcp.servers]]
 name = "brave"
