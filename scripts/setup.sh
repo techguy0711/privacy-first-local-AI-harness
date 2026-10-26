@@ -230,17 +230,23 @@ elif [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 # ---------- 3. Pull models for the current mode ----------
-if [[ "$MODE" == "server" ]]; then
-  BASE_MODEL="llama3.3:70b"
-else
-  BASE_MODEL="gemma4:12b"
-fi
+# The base model is the FROM line of Modelfile.$MODE (llama3.3:70b for server,
+# gemma4:12b for local; server-test/ swaps in llama3.1:8b), and must be an
+# allowlisted chat model (hard rule 1).
+MODELFILE="$REPO_ROOT/Modelfile.$MODE"
+BASE_MODEL="$(awk '$1 == "FROM" {print $2; exit}' "$MODELFILE")"
+case "$BASE_MODEL" in
+  llama3.1:8b|llama3.3:70b|gemma4:12b) ;;
+  *)
+    err "Modelfile.$MODE is FROM '$BASE_MODEL', which is not an allowlisted chat model (llama3.1:8b, llama3.3:70b, gemma4:12b)"
+    exit 1
+    ;;
+esac
 
 if ! ollama show "$BASE_MODEL" >/dev/null 2>&1; then
   log "Pulling $BASE_MODEL..."
   ollama pull "$BASE_MODEL"
 fi
-MODELFILE="$REPO_ROOT/Modelfile.$MODE"
 MODEL_HASH="$(shasum -a 256 "$MODELFILE" | awk '{print $1}')"
 MODEL_STAMP="$REPO_ROOT/run/model-$MODE.sha256"
 if [[ "$(cat "$MODEL_STAMP" 2>/dev/null || true)" != "$MODEL_HASH" ]] || ! ollama show "coder-$MODE" >/dev/null 2>&1; then

@@ -1,0 +1,22 @@
+# The test server's TLS proxy: the routes of docs/server.md step 3, with a
+# certificate from Caddy's own local CA instead of the team's. Its root is
+# ~/.local/share/caddy/pki/authorities/local/root.crt in the container.
+{
+	# The CA stays in the container; nothing tries to add it to a trust store.
+	skip_install_trust
+	# Only 443 (published as 127.0.0.1:8443 on the Mac); no :80 redirect.
+	auto_https disable_redirects
+	admin off
+}
+
+localhost {
+	tls internal
+	handle /v1/* {
+		reverse_proxy 127.0.0.1:8787 {
+			flush_interval -1
+		}
+	}
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}

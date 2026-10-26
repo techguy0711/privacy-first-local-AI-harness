@@ -17,6 +17,9 @@ data/
 logs/
 run/
 
+# The test server's CA certificate, copied out of its container (docs/server.md)
+server-test/test-ca.crt
+
 # Backups made by setup.sh before overwriting files outside the repo
 *.bak
 

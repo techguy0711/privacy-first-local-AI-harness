@@ -1,0 +1,5 @@
+FROM llama3.1:8b
+PARAMETER num_ctx 16384
+# Test server only (server-test/, docs/server.md): replaces Modelfile.server in
+# the test box, because Llama 3.3 70B doesn't fit a 16 GB Mac. Llama 3.1 8B has
+# the same chat template and tool-call format, and the context stays 16K.

@@ -1,0 +1,19 @@
+# server-test/Dockerfile builds with the repo root as its context: send only
+# what a fresh clone has, never the secrets (.env) or this machine's own
+# install (venv, chats, logs, builds). At the root because Docker's legacy
+# builder reads no other ignore file.
+.git
+**/.env
+**/.env.*.bak
+**/*.bak
+.continue
+.venv
+bin
+build
+data
+logs
+run
+**/.DS_Store
+**/__pycache__
+**/*.pyc
+server-test/test-ca.crt

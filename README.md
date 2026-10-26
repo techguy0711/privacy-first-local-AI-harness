@@ -138,7 +138,7 @@ The editor option rebuilds the IDE agent (`acp-bridge`) only when its pinned ver
 
 ## Shared server setup
 
-For the shared `coder-server` deployment, see [docs/server.md](docs/server.md). That guide covers `MODE=server`, provisioning, TLS, and per-user API keys. Local setup above uses `MODE=local`.
+For the shared `coder-server` deployment, see [docs/server.md](docs/server.md). That guide covers `MODE=server`, provisioning, TLS, and per-user API keys. Local setup above uses `MODE=local`. To try server mode on your Mac first, in a Linux container behind a TLS proxy, see [Test server mode on a Mac](docs/server.md#test-server-mode-on-a-mac).
 
 ## Project rules and privacy
 

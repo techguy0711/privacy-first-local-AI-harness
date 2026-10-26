@@ -93,6 +93,68 @@ Increase `QUEUE_ACTIVE` only after measuring the server under representative cod
 
 For unattended operation, configure process supervision with launchd on macOS or systemd on Linux. Preserve the working directory and environment used by `stack.sh`. The scripts do not provide automatic restart supervision or high availability.
 
+## Test server mode on a Mac
+
+`server-test/` runs server mode on a 16 GB Mac, in a Linux container, the way an administrator sets up the real server: a Debian 13 box with the prerequisites installed, `.env` with `MODE=server`, then `./scripts/setup.sh --editors` and `./scripts/stack.sh up` as an unprivileged account, and Caddy as the TLS proxy with the routes above. Only the proxy is published, on the Mac's loopback: **https://localhost:8443/** (`SERVER_HOST=localhost:8443`). It is a test setup, not a way to deploy.
+
+Two things differ from a real server:
+
+- **Ollama runs on the Mac**, which has the GPU; the container forwards its `127.0.0.1:11434` to it. Docker on a Mac has no GPU, so Ollama inside the container would be slow.
+- **`coder-server` is built on Llama 3.1 8B** (`server-test/Modelfile.server`, which replaces `Modelfile.server` in the container), because Llama 3.3 70B doesn't fit 16 GB. It uses the same chat template and tool-call format, and the same 16K context. `setup.sh` creates it in the Mac's Ollama; `ollama rm coder-server` removes it. It is much weaker with tools: given Brave Search (2026-10-26), it got a search through in 3 of 10 tries. The rest sent arguments of the wrong type, which the Brave server refuses, or wrote the call out as text. `coder-local` (Gemma 4 12B), through the same gateway, system prompt and Brave server, got 3 of 3. So expect search in the test server to fail often; that says nothing about the stack.
+
+### Start it
+
+You need Ollama running on the Mac with `llama3.1:8b` and `nomic-embed-text` pulled, and a container runtime. Tested with Colima 0.10.3 (open source, no telemetry): `brew install colima docker docker-compose`, then `colima start --cpu 4 --memory 4`. Homebrew's Compose works as `docker-compose`; for `docker compose`, add the `cliPluginsExtraDirs` line that `brew info docker-compose` shows to `~/.docker/config.json`. Docker Desktop and OrbStack work too.
+
+From the repo root:
+
+```bash
+docker compose -f server-test/compose.yaml up -d --build
+```
+
+```bash
+docker compose -f server-test/compose.yaml logs -f
+```
+
+Building the image takes about 6 minutes, mostly downloading Ollama's Linux release for its CLI. The first start takes another 10 to 15 minutes: it installs Open WebUI (6.6 GB on Linux, 4.2 GB of it PyTorch's CUDA libraries) and downloads the Whisper model. It is ready when the log shows `Test server: https://localhost:8443/`. Later starts take about 15 seconds. The container and its volume use about 9 GB inside Colima's VM. Before chatting, run `ollama stop coder-local` if it is loaded: on 16 GB the two models don't fit in memory together (`coder-server` takes 7.1 GB).
+
+### Use it
+
+The certificate comes from Caddy's own local CA, which only this container has. Copy its root out to use it with command-line tools:
+
+```bash
+docker compose -f server-test/compose.yaml cp server:/home/harness/.local/share/caddy/pki/authorities/local/root.crt server-test/test-ca.crt
+```
+
+A browser shows a certificate warning for https://localhost:8443/; accept it for this site, or add `server-test/test-ca.crt` to your login keychain as trusted (and remove it when you're done testing). Then follow [step 4](#4-grant-team-access): the first account becomes the administrator, passwords need 15 characters, and each account can create an API key. Add the other accounts in **Admin Panel → Users**: Open WebUI closes sign-ups once the administrator exists, though only until the next restart, after which anyone who reaches the page can sign up again as a pending account (it can create an API key, which the gateway refuses until an administrator approves the account). To try a key:
+
+```bash
+curl --cacert server-test/test-ca.crt -H "Authorization: Bearer sk-..." https://localhost:8443/v1/models
+```
+
+Run the checks inside the container, where they see what the server sees:
+
+```bash
+docker compose -f server-test/compose.yaml exec server ./scripts/doctor.sh
+```
+
+The Ollama checks there describe the container, not the Mac's Ollama (its Ollama Cloud and memory settings come from the Mac's own `setup.sh`).
+
+### Change it
+
+| To | Run |
+|---|---|
+| Edit the server's `.env` (for example `BRAVE_API_KEY` or `QUEUE_ACTIVE`), then apply it | `docker compose -f server-test/compose.yaml exec server nano .env`, then `docker compose -f server-test/compose.yaml restart server` |
+| Test a change to the repo | `docker compose -f server-test/compose.yaml up -d --build`: the container copies the new files into its checkout and runs `setup.sh` again |
+| Read a service's log | `docker compose -f server-test/compose.yaml exec server tail -f logs/gateway.log` (also `logs/openwebui.log`, `logs/gateway-audit.log`) |
+| Stop it, keeping accounts and chats | `docker compose -f server-test/compose.yaml down` |
+| Start over from an empty server | `docker compose -f server-test/compose.yaml down -v` (deletes the accounts, chats, keys, the test CA and the installed Open WebUI, so the next start is a first start again) |
+| Free the VM's memory when you're done | `docker compose -f server-test/compose.yaml down`, then `colima stop` |
+
+The server's `.env`, its data and its logs live in a Docker volume (the `harness` account's home, with the checkout in `~/stack`), never in this repo; the image is built from the files a fresh clone has (`.dockerignore`, and the build stops if `.env` or `data/` got in), so the Mac's `.env` and chats stay out of it.
+
+**The IDE agents can't connect to it yet.** acp-bridge trusts only public certificate authorities (its HTTP client is built with `rustls` and the built-in Mozilla roots), so it rejects this test CA, and would reject a team's private CA the same way. Browsers and `curl --cacert` work.
+
 ## Operations
 
 ### Stop or restart

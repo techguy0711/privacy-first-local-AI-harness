@@ -24,3 +24,5 @@ This repo is a self-hosted AI coding assistant stack (Ollama + inference gateway
 ```
 
 Re-running `setup.sh` must change nothing on a second run. Changing `MODE` in `.env` must switch the model everywhere with no code changes.
+
+`server-test/` runs `MODE=server` on a Mac for testing: a Debian container that runs these scripts as a server administrator would, behind Caddy on https://localhost:8443/, with Ollama on the Mac and `coder-server` built on `llama3.1:8b` (`server-test/Modelfile.server`). It is not a deployment method; see `docs/server.md`, "Test server mode on a Mac".

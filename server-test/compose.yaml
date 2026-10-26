@@ -1,0 +1,23 @@
+# Test server for MODE=server on this Mac (docs/server.md, "Test server mode
+# on a Mac"). Only the TLS proxy is published, on the Mac's loopback:
+# https://localhost:8443/
+name: harness-server-test
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: server-test/Dockerfile
+    init: true
+    ports:
+      - "127.0.0.1:8443:443"
+    # The Mac, where Ollama runs (boot.sh forwards to it).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # The server account's home: the checkout (~/stack, with .env, data/,
+      # logs/, .venv/), uv's Python and cache, Caddy's local CA
+      - home:/home/harness
+    stop_grace_period: 30s
+
+volumes:
+  home:
