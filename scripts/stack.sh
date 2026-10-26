@@ -203,8 +203,14 @@ start_openwebui() {
 }
 
 # Two settings that 0.12.3 keeps only in its database, not in env vars:
-# - Brave Search on by default in new chats with the chat model (off again
-#   without a key): the model's Tools setting (Admin Settings > Models). A
+# - The chat model's tools (Admin Settings > Models): Brave Search on by
+#   default in new chats (off again without a key), and Open WebUI's own
+#   built-in tools off. Those are ~25 tools (search of Knowledge, chats and
+#   notes; calendar, automations, memory, tasks, time...) added to every chat
+#   from the browser: their definitions filled most of each prompt, and the
+#   model searched Knowledge that doesn't exist instead of answering, then
+#   made up tools of its own. Attached files and Knowledge still reach the
+#   model through Open WebUI's retrieval (the file_context capability). A
 #   model with no entry yet gets a private one (no access grants), which is
 #   what Open WebUI does for models without one: only admins see it.
 # - services/voice_cleanup.py as an active event function (Admin Settings >
@@ -239,17 +245,21 @@ async def default_tools():
     model_id, tool, want = os.environ['CHAT_MODEL'], 'server:mcp:brave', os.environ['BRAVE_ON'] == '1'
     model = await Models.get_model_by_id(model_id)
     if model is None:
-        if want:
-            admin = await Users.get_super_admin_user()
-            form = ModelForm(id=model_id, name=model_id, meta=ModelMeta(toolIds=[tool]), params=ModelParams(),
-                             access_grants=[])
-            if await Models.insert_new_model(form, admin.id if admin else '') is None:
-                raise RuntimeError(f'could not add {model_id}')
+        admin = await Users.get_super_admin_user()
+        form = ModelForm(id=model_id, name=model_id, params=ModelParams(), access_grants=[],
+                         meta=ModelMeta(toolIds=[tool] if want else [], capabilities={'builtin_tools': False}))
+        if await Models.insert_new_model(form, admin.id if admin else '') is None:
+            raise RuntimeError(f'could not add {model_id}')
     else:
         meta = model.meta.model_dump()
         tool_ids = list(meta.get('toolIds') or [])
         if want != (tool in tool_ids):
             meta['toolIds'] = tool_ids + [tool] if want else [t for t in tool_ids if t != tool]
+        # Other capabilities stay as they are; a missing one counts as on.
+        capabilities = meta.get('capabilities') or {}
+        if capabilities.get('builtin_tools', True):
+            meta['capabilities'] = {**capabilities, 'builtin_tools': False}
+        if meta != model.meta.model_dump():
             # Without access_grants the update leaves the model's sharing as it is.
             form = ModelForm(**{**model.model_dump(exclude={'access_grants'}), 'meta': meta})
             if await Models.update_model_by_id(model_id, form) is None:
@@ -285,8 +295,11 @@ PYEOF
   rm -rf "$static_tmp" "$out_file"
   if [[ "$out" != *'tools: ok'* ]]; then
     echo "WARNING: could not set Open WebUI's default tools for $CHAT_MODEL; see logs/openwebui.log" >&2
-  elif [[ -n "${BRAVE_API_KEY:-}" ]]; then
-    echo "Brave Search: on by default in new $CHAT_MODEL chats"
+  else
+    echo "Open WebUI's built-in tools: off for $CHAT_MODEL"
+    if [[ -n "${BRAVE_API_KEY:-}" ]]; then
+      echo "Brave Search: on by default in new $CHAT_MODEL chats"
+    fi
   fi
   if [[ "$out" != *'voice cleanup: ok'* ]]; then
     echo "WARNING: could not install the voice-recording cleanup in Open WebUI, so recordings are kept; see logs/openwebui.log" >&2
