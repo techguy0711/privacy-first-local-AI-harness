@@ -18,8 +18,8 @@ This repo is a self-hosted AI coding assistant stack (Ollama + inference gateway
 ## The three scripts
 
 ```
-./scripts/setup.sh [--editors]   # idempotent install/config, incl. the pinned Whisper model for voice input (data/whisper/), Ollama's memory settings (OLLAMA_KV_CACHE_TYPE, OLLAMA_NUM_PARALLEL and LLAMA_ARG_* in .env: launchctl + ~/Library/LaunchAgents/local-ai-harness.ollama-env.plist on macOS; prints the systemd steps on Linux); --editors prints the IDE registrations (Android Studio, Xcode, VS Code; nothing is written to editor settings) and, on macOS, builds bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
-./scripts/stack.sh up|down|status   # inference gateway + Open WebUI + Brave MCP server (skipped if BRAVE_API_KEY is empty); Ollama runs separately
+./scripts/setup.sh [--editors]   # idempotent install/config, incl. the pinned Whisper model for voice input (data/whisper/), Ollama's memory settings (OLLAMA_KV_CACHE_TYPE, OLLAMA_NUM_PARALLEL and LLAMA_ARG_* in .env: launchctl + ~/Library/LaunchAgents/local-ai-harness.ollama-env.plist on macOS; prints the systemd steps on Linux), the Brave MCP server from services/brave-mcp/package-lock.json into build/brave-mcp/ (only with BRAVE_API_KEY; npm ci, no install scripts), deletion of faster-whisper's bundled Silero VAD model (not on the allowlist), and build/sbom.cdx.json (CycloneDX, scripts/sbom.py); --editors prints the IDE registrations (Android Studio, Xcode, VS Code; nothing is written to editor settings) and, on macOS, builds bin/acp-bridge from the pinned source + editors/acp/acp-bridge.patch and queue.patch (needs Rust; never auto-installed)
+./scripts/stack.sh up|down|status   # inference gateway + Open WebUI + Brave MCP server (skipped if BRAVE_API_KEY is empty); Ollama runs separately; MODE=server adds audit logs, 12-hour logins, 15-character passwords and HTTPS-only cookies unless .env overrides them (docs/compliance.md)
 ./scripts/doctor.sh               # PASS/FAIL per check; exits non-zero on any failure
 ```
 

@@ -1,16 +1,19 @@
-"""Single-process, bounded fair queue. No prompt logs or on-disk job store."""
+"""Single-process, bounded fair queue. No prompt logs or on-disk job store;
+the optional audit log (GATEWAY_AUDIT_LOG) holds metadata only."""
 import asyncio
 import base64
 import hashlib
 import hmac
 import json
+import logging
 import socket
 import time
 import uuid
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
+from logging.handlers import TimedRotatingFileHandler
 from urllib.parse import urlparse
 
 import httpx
@@ -53,6 +56,28 @@ def inline_image(part):
     return {'type': 'image_url', 'image_url': {'url': url}}, len(raw)
 
 
+def audit_logger(path):
+    """One JSON line per request and per finished job -- who, when, what,
+    outcome -- never message content. '' turns it off. Rotated at midnight UTC;
+    old files are left for the operator to archive or forward, never deleted."""
+    log = logging.getLogger('gateway.audit')
+    log.propagate = False
+    for handler in list(log.handlers):
+        log.removeHandler(handler)
+        handler.close()
+    if not path:
+        return lambda **fields: None
+    handler = TimedRotatingFileHandler(path, when='midnight', utc=True)
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+    def audit(**fields):
+        ts = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        log.info(json.dumps({'ts': ts, **fields}))
+    return audit
+
+
 @dataclass
 class Job:
     id: str
@@ -62,6 +87,7 @@ class Job:
     fingerprint: str
     key: str | None
     created: float = field(default_factory=time.monotonic)
+    started: float = 0
     finished: float = 0
     state: str = 'queued'
     result: dict | None = None
@@ -73,8 +99,9 @@ class Job:
 
 
 class Queue:
-    def __init__(self, cfg, client):
+    def __init__(self, cfg, client, audit=None):
         self.cfg, self.client = cfg, client
+        self.audit = audit or (lambda **fields: None)
         self.jobs = {}
         self.keys = {}
         self.users = OrderedDict()
@@ -124,8 +151,14 @@ class Queue:
         return j
 
     def finish(self, j, state, error=None, code=200):
+        first = j.state not in TERMINAL
         j.state, j.error, j.code, j.finished = state, error, code, time.monotonic()
         j.body = {}  # release source code as soon as the request ends
+        if first:
+            self.audit(event='job', job=j.id, user=j.user, kind=j.kind,
+                       model=self.cfg.model if j.kind == 'chat' else 'nomic-embed-text', state=state, code=code,
+                       wait_s=round((j.started or j.finished) - j.created, 1),
+                       run_s=round(j.finished - j.started, 1) if j.started else 0)
         self.wakeup.set()
 
     def cancel(self, j):
@@ -190,7 +223,7 @@ class Queue:
                     self.users.move_to_end(user)
                 self.last_user = user
                 j = self.jobs[jid]
-                j.state = 'running'
+                j.state, j.started = 'running', time.monotonic()
                 self.running.add(jid)
                 j.task = asyncio.create_task(self.run(j))
                 j.task.add_done_callback(lambda task, jid=jid: self.release(jid))
@@ -282,7 +315,7 @@ def create_app(cfg=None, transport=None):
             raise RuntimeError('GATEWAY_SERVICE_KEY missing; run setup.sh')
         async with httpx.AsyncClient(timeout=httpx.Timeout(cfg.run_seconds, connect=5),
                                      trust_env=False, transport=transport) as client:
-            q = Queue(cfg, client)
+            q = Queue(cfg, client, audit_logger(cfg.audit_log))
             app.state.queue = q
             worker = asyncio.create_task(q.scheduler())
             try:
@@ -302,7 +335,23 @@ def create_app(cfg=None, transport=None):
         response.headers['Cache-Control'] = 'no-store'
         return response
 
+    @app.middleware('http')
+    async def audit(request, call_next):
+        start = time.monotonic()
+        response = await call_next(request)
+        q = getattr(request.app.state, 'queue', None)
+        if q and request.url.path.startswith('/v1/'):
+            # Refused requests too (401, 403, 429); a stream's status is its first byte's.
+            q.audit(event='request', user=getattr(request.state, 'user', None), method=request.method,
+                    path=request.url.path, status=response.status_code,
+                    ms=round((time.monotonic() - start) * 1000))
+        return response
+
     async def user(request):
+        request.state.user = await identify(request)
+        return request.state.user
+
+    async def identify(request):
         token = request.headers.get('authorization', '')
         # Bytes: compare_digest raises TypeError (a 500) on non-ASCII str.
         if hmac.compare_digest(token.encode(), ('Bearer ' + cfg.service_key).encode()):

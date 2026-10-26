@@ -159,6 +159,22 @@ check_webui_ocr_models() {
   fi
 }
 
+check_webui_vad_model() {
+  # faster-whisper bundles Silero's voice-activity model, which is not on the
+  # allowlist; setup.sh deletes it (voice input never loads it).
+  local name="No bundled Silero VAD model in Open WebUI's venv" found
+  if [[ ! -d "$REPO_ROOT/.venv/openwebui/lib" ]]; then
+    skip "$name" "Open WebUI not installed"
+    return
+  fi
+  found="$(find "$REPO_ROOT/.venv/openwebui/lib" -path '*/faster_whisper/assets/silero_vad*.onnx' 2>/dev/null | head -1)"
+  if [[ -z "$found" ]]; then
+    pass "$name"
+  else
+    fail "$name" "${found#"$REPO_ROOT/"} -- run ./scripts/setup.sh"
+  fi
+}
+
 check_whisper_model() {
   # Open WebUI's voice input reads this folder only (HF_HUB_OFFLINE=1), so a
   # missing or altered file means no transcription, never a download.
@@ -308,6 +324,18 @@ check_brave() {
   if [[ -z "${BRAVE_API_KEY:-}" ]]; then
     pass "Brave MCP server: disabled: no key"
     return
+  fi
+  # setup.sh installs it with npm ci from the pinned lockfile; stack.sh runs
+  # it with node, so starting it never contacts the npm registry.
+  local lock_name="Brave MCP server installed from services/brave-mcp/package-lock.json" cmd
+  if [[ "$(cat "$REPO_ROOT/build/brave-mcp/.stamp" 2>/dev/null)" == "lock_sha256=$(shasum -a 256 "$REPO_ROOT/services/brave-mcp/package-lock.json" | awk '{print $1}')" ]]; then
+    pass "$lock_name"
+  else
+    fail "$lock_name" "missing or out of date in build/brave-mcp/ -- run ./scripts/setup.sh"
+  fi
+  cmd="$(ps -o command= -p "$(cat "$RUN_DIR/brave-mcp.pid" 2>/dev/null)" 2>/dev/null)"
+  if [[ "$cmd" == *npx* || "$cmd" == *"npm exec"* ]]; then
+    warn "Brave MCP server runs from build/brave-mcp/" "an older stack.sh started it through npx, which contacts the npm registry -- restart: ./scripts/stack.sh down && ./scripts/stack.sh up"
   fi
   # GET /ping is the server's own health route (answers {"message":"pong"};
   # dist/protocols/http.js in @brave/brave-search-mcp-server 2.1.4). Not a full
@@ -540,10 +568,43 @@ check_mac_analytics() {
   esac
 }
 
+check_server_defaults() {
+  # MODE=server defaults that stack.sh sets unless .env overrides them; an
+  # override is reported, not failed (docs/compliance.md).
+  local name="Shared-server defaults (audit logs, 12-hour logins, 15-character passwords, HTTPS-only cookies)" weak=()
+  if [[ "$MODE" != "server" ]]; then
+    skip "$name" "MODE=local"
+    return
+  fi
+  [[ "${GATEWAY_AUDIT_LOG:-1}" == "1" ]] || weak+=("GATEWAY_AUDIT_LOG=$GATEWAY_AUDIT_LOG")
+  [[ "${AUDIT_LOG_LEVEL:-METADATA}" != "NONE" ]] || weak+=("AUDIT_LOG_LEVEL=NONE")
+  case "${JWT_EXPIRES_IN:-12h}" in -1|0) weak+=("JWT_EXPIRES_IN=$JWT_EXPIRES_IN (never expires)") ;; esac
+  [[ "${ENABLE_PASSWORD_VALIDATION:-true}" == "true" ]] || weak+=("ENABLE_PASSWORD_VALIDATION=$ENABLE_PASSWORD_VALIDATION")
+  [[ "${WEBUI_SESSION_COOKIE_SECURE:-true}" == "true" ]] || weak+=("WEBUI_SESSION_COOKIE_SECURE=$WEBUI_SESSION_COOKIE_SECURE")
+  if [[ ${#weak[@]} -eq 0 ]]; then
+    pass "$name"
+  else
+    warn "$name" "overridden in .env: ${weak[*]}"
+  fi
+}
+
+check_sbom() {
+  # Written by setup.sh (scripts/sbom.py) for supply-chain review.
+  local name="Software bill of materials is current (build/sbom.cdx.json)" sbom="$REPO_ROOT/build/sbom.cdx.json"
+  if [[ ! -f "$sbom" ]]; then
+    warn "$name" "missing -- run ./scripts/setup.sh"
+  elif ! grep -q "\"pkg:pypi/open-webui@${OPEN_WEBUI_VERSION:-}\"" "$sbom"; then
+    warn "$name" "written for another Open WebUI version -- run ./scripts/setup.sh"
+  else
+    pass "$name"
+  fi
+}
+
 check_ollama
 check_ollama_cache_limits
 check_allowlist
 check_webui_ocr_models
+check_webui_vad_model
 check_whisper_model
 check_voice_cleanup
 check_pins_match_example
@@ -556,6 +617,8 @@ check_brave
 check_acp_web_search_url
 check_localhost_binding
 check_privacy_env
+check_server_defaults
+check_sbom
 check_continue_retired
 check_env_not_tracked
 check_private_files

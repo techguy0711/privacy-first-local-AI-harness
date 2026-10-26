@@ -301,6 +301,13 @@ printf 'rapidocr\nrapidocr-onnxruntime\n' > "$UV_EXCLUDES"
 log "Installing open-webui==$OPEN_WEBUI_VERSION without rapidocr (no-op if already installed)..."
 uv pip install --python "$VENV_DIR/bin/python" --excludes "$UV_EXCLUDES" "open-webui==$OPEN_WEBUI_VERSION"
 rm -f "$UV_EXCLUDES"
+# faster-whisper (voice input) bundles Silero's voice-activity model. It is
+# not on the allowlist and never loaded (stack.sh keeps WHISPER_VAD_FILTER
+# off), so it is deleted rather than left installed: hard rule 1.
+if [[ -n "$(find "$VENV_DIR/lib" -path '*/faster_whisper/assets/silero_vad*.onnx' 2>/dev/null)" ]]; then
+  find "$VENV_DIR/lib" -path '*/faster_whisper/assets/silero_vad*.onnx' -delete
+  log "Removed faster-whisper's bundled Silero VAD model (not on the allowlist; voice input doesn't use it)"
+fi
 
 # ---------- 5b. Speech-to-text model (Open WebUI voice input) ----------
 # Fetched here, once, from the pinned commit and checked file by file (pins in
@@ -323,6 +330,38 @@ else
   fi
   rm -rf "$WHISPER_DIR"
   mv "$WHISPER_TMP" "$WHISPER_DIR"
+fi
+
+# ---------- 5c. Brave Search MCP server (only with BRAVE_API_KEY) ----------
+# Installed here with npm ci from services/brave-mcp/package-lock.json: every
+# package at an exact version, checked against its sha512, no install scripts.
+# stack.sh then starts it with node and never contacts the npm registry, as
+# npx did on every start.
+BRAVE_DIR="$REPO_ROOT/build/brave-mcp"
+BRAVE_LOCK="$REPO_ROOT/services/brave-mcp/package-lock.json"
+if [[ -n "${BRAVE_API_KEY:-}" ]]; then
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    err "Node.js (node and npm) is not installed -- needed for the Brave Search MCP server, since BRAVE_API_KEY is set. This script will not auto-install it."
+    echo "Install it yourself (brew install node), or leave BRAVE_API_KEY empty to skip web search, then re-run." >&2
+    exit 1
+  fi
+  BRAVE_PINNED="$(node -p "require(process.argv[1]).packages['node_modules/@brave/brave-search-mcp-server'].version" "$BRAVE_LOCK")"
+  if [[ "$BRAVE_PINNED" != "${BRAVE_MCP_VERSION:-}" ]]; then
+    err "BRAVE_MCP_VERSION=${BRAVE_MCP_VERSION:-<unset>} in .env, but services/brave-mcp/package-lock.json pins $BRAVE_PINNED -- set BRAVE_MCP_VERSION=$BRAVE_PINNED in .env (an upgrade changes the lockfile)."
+    exit 1
+  fi
+  BRAVE_STAMP="lock_sha256=$(shasum -a 256 "$BRAVE_LOCK" | awk '{print $1}')"
+  if [[ "$(cat "$BRAVE_DIR/.stamp" 2>/dev/null || true)" == "$BRAVE_STAMP" \
+    && -f "$BRAVE_DIR/node_modules/@brave/brave-search-mcp-server/dist/index.js" ]]; then
+    log "Brave Search MCP server $BRAVE_PINNED already installed in build/brave-mcp/"
+  else
+    log "Installing Brave Search MCP server $BRAVE_PINNED into build/brave-mcp/ (npm ci from the pinned lockfile)..."
+    rm -rf "$BRAVE_DIR"
+    mkdir -p "$BRAVE_DIR"
+    cp "$REPO_ROOT/services/brave-mcp/package.json" "$BRAVE_LOCK" "$BRAVE_DIR/"
+    (cd "$BRAVE_DIR" && npm ci --ignore-scripts --omit=dev --no-audit --no-fund --no-update-notifier)
+    printf '%s\n' "$BRAVE_STAMP" > "$BRAVE_DIR/.stamp"
+  fi
 fi
 
 # ---------- 6. Generate WEBUI_SECRET_KEY if empty ----------
@@ -556,6 +595,17 @@ EOF
   fi
 fi
 
+# ---------- 9. Software bill of materials ----------
+# CycloneDX JSON of what is installed here (Python and npm packages,
+# acp-bridge and its crates, the models with their digests), for supply-chain
+# review. Rewritten only when something changed.
+if SBOM_MSG="$(WHISPER_REPO="$WHISPER_REPO" WHISPER_REVISION="$WHISPER_REVISION" WHISPER_SHA256="$WHISPER_SHA256" \
+  "$VENV_DIR/bin/python" -I "$REPO_ROOT/scripts/sbom.py" "$REPO_ROOT/build/sbom.cdx.json")"; then
+  log "SBOM: $SBOM_MSG"
+else
+  err "Could not write build/sbom.cdx.json (error above); doctor.sh reports it until a re-run of ./scripts/setup.sh succeeds."
+fi
+
 cat <<EOF
 
 Setup complete for MODE=$MODE.
@@ -563,6 +613,7 @@ Setup complete for MODE=$MODE.
   Embed model:    $EMBED_MODEL
   Chat backend:   $INFERENCE_BACKEND ($CHAT_MODEL)
   Open WebUI:     $VENV_DIR (version $OPEN_WEBUI_VERSION)
+  SBOM:           build/sbom.cdx.json
 
 Next: ./scripts/stack.sh up
 EOF

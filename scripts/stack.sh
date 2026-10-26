@@ -159,6 +159,23 @@ start_openwebui() {
       # off by default since 0.12, and an Admin-panel change would not survive
       # a restart with ENABLE_PERSISTENT_CONFIG=false.
       export ENABLE_API_KEYS=true USER_PERMISSIONS_FEATURES_API_KEYS=true ENABLE_USER_STATUS=true
+      # Shared-server defaults, each overridable in .env (docs/compliance.md):
+      # - an audit log of sign-in attempts and every change (who, what, when,
+      #   outcome) without request bodies, in data/openwebui/audit.log
+      #   (rotated at 10 MB, never deleted); the gateway logs inference;
+      # - logins that expire after 12 hours instead of 4 weeks;
+      # - passwords of at least 15 characters and no other composition rules
+      #   (NIST SP 800-63B), checked when one is set;
+      # - login cookies sent over HTTPS only (the TLS proxy in docs/server.md).
+      export AUDIT_LOG_LEVEL="${AUDIT_LOG_LEVEL:-METADATA}"
+      export JWT_EXPIRES_IN="${JWT_EXPIRES_IN:-12h}"
+      export ENABLE_PASSWORD_VALIDATION="${ENABLE_PASSWORD_VALIDATION:-true}"
+      if [[ -z "${PASSWORD_VALIDATION_REGEX_PATTERN:-}" ]]; then
+        PASSWORD_VALIDATION_REGEX_PATTERN='^.{15,}$'
+        PASSWORD_VALIDATION_HINT="${PASSWORD_VALIDATION_HINT:-At least 15 characters.}"
+      fi
+      export PASSWORD_VALIDATION_REGEX_PATTERN PASSWORD_VALIDATION_HINT
+      export WEBUI_SESSION_COOKIE_SECURE="${WEBUI_SESSION_COOKIE_SECURE:-true}"
     fi
     # Brave Search reaches Open WebUI as an MCP tool server: the local Brave
     # MCP server started below holds BRAVE_API_KEY, so Open WebUI never sees
@@ -305,19 +322,26 @@ start_brave() {
     echo "Brave MCP server already running (pid $(cat "$BRAVE_PID_FILE"))"
     return
   fi
-  if ! command -v npx >/dev/null 2>&1; then
-    echo "ERROR: npx not found; Node.js is required to run the Brave MCP server." >&2
+  if ! command -v node >/dev/null 2>&1; then
+    echo "ERROR: node not found; Node.js is required to run the Brave MCP server." >&2
     exit 1
   fi
-  local pkg="@brave/brave-search-mcp-server"
-  if [[ -n "$BRAVE_MCP_VERSION" ]]; then
-    pkg="$pkg@$BRAVE_MCP_VERSION"
+  # Installed by setup.sh from services/brave-mcp/package-lock.json.
+  local brave_dir="$REPO_ROOT/build/brave-mcp"
+  local server="$brave_dir/node_modules/@brave/brave-search-mcp-server/dist/index.js"
+  if [[ ! -f "$server" ]]; then
+    echo "ERROR: the Brave MCP server is not installed (build/brave-mcp/). Run ./scripts/setup.sh first." >&2
+    exit 1
   fi
   echo "Starting Brave MCP server on $BRAVE_MCP_HOST:$BRAVE_MCP_PORT..."
   (
-    export BRAVE_API_KEY="$BRAVE_API_KEY"
-    export BRAVE_MCP_ENABLED_TOOLS="$BRAVE_MCP_ENABLED_TOOLS"
-    nohup npx -y "$pkg" --transport http --host "$BRAVE_MCP_HOST" --port "$BRAVE_MCP_PORT" \
+    # Its own folder, not the repo: the server loads a .env from its working
+    # directory (dotenv), and this repo's holds every other secret.
+    cd "$brave_dir"
+    # Only what it needs; the rest of .env (set -a above) stays out of it.
+    nohup env -i PATH="$PATH" HOME="$HOME" BRAVE_API_KEY="$BRAVE_API_KEY" \
+      BRAVE_MCP_ENABLED_TOOLS="$BRAVE_MCP_ENABLED_TOOLS" \
+      node "$server" --transport http --host "$BRAVE_MCP_HOST" --port "$BRAVE_MCP_PORT" \
       >> "$LOG_DIR/brave-mcp.log" 2>&1 &
     echo $! > "$BRAVE_PID_FILE"
   )

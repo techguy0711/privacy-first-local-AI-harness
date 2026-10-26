@@ -1,0 +1,18 @@
+privacy-first-local-AI-harness
+Copyright 2026 Kristhian De Oliveira and contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository also contains material from other projects, under their own
+licenses:
+
+- scripts/install-homebrew.sh is a copy of Homebrew's official installer
+  (https://github.com/Homebrew/install), BSD 2-Clause License,
+  Copyright (c) 2009-present, Homebrew contributors.
+- editors/acp/acp-bridge.patch and editors/acp/queue.patch modify acp-bridge
+  (https://github.com/BlakeHung/acp-bridge), MIT License; the patched build
+  keeps acp-bridge's own license.
+
+Components that setup.sh installs (Ollama, Open WebUI, the Brave Search MCP
+server, the models) are not part of this repository and keep their own
+licenses; build/sbom.cdx.json, written by setup.sh, lists them.

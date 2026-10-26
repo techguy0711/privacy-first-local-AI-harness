@@ -1,14 +1,16 @@
 import asyncio
 import base64
 import json
+import os
 import socket
+import tempfile
 import unittest
 from dataclasses import replace
 from datetime import date
 
 import httpx
-from services.config import Settings
-from services.gateway import Queue, create_app, loopback_sockets
+from services.config import ROOT, Settings
+from services.gateway import Queue, audit_logger, create_app, loopback_sockets
 
 
 BODY = {'model': 'coder-server:latest', 'messages': [{'role': 'user', 'content': 'test'}]}
@@ -27,7 +29,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.gates = []
         self.block = False
         self.fail_backend = False
-        self.cfg = Settings.read({'MODE': 'server', 'GATEWAY_SERVICE_KEY': 'test-service'})
+        self.cfg = Settings.read({'MODE': 'server', 'GATEWAY_SERVICE_KEY': 'test-service', 'GATEWAY_AUDIT_LOG': '0'})
         async def upstream(request):
             self.assertNotIn('cookie', request.headers)
             if request.url.path == '/api/v1/users/user/status':
@@ -290,6 +292,27 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         for token in (b'Bearer \xe9', b'\xff'):
             self.assertEqual((await self.client.get('/v1/models', headers={'Authorization': token})).status_code, 401)
 
+    async def test_audit_log_is_metadata_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'audit.log')
+            q = self.app.state.queue
+            q.audit = audit_logger(path)
+            secret = 'def leaked_source(): return 42'
+            body = {**BODY, 'messages': [{'role': 'user', 'content': secret}]}
+            r = await self.client.post('/v1/chat/completions', json=body, headers={'Authorization': 'Bearer bob'})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual((await self.client.get('/v1/models', headers={'Authorization': 'Bearer invalid'})).status_code, 401)
+            audit_logger('')  # closes the file
+            with open(path) as f:
+                text = f.read()
+        self.assertNotIn('leaked_source', text)
+        lines = [json.loads(line) for line in text.splitlines()]
+        job = next(e for e in lines if e['event'] == 'job')
+        self.assertEqual((job['user'], job['state'], job['model'], job['code']), ('bob', 'completed', 'coder-server:latest', 200))
+        requests = [(e['user'], e['path'], e['status']) for e in lines if e['event'] == 'request']
+        self.assertEqual(requests, [('bob', '/v1/chat/completions', 200), (None, '/v1/models', 401)])
+        self.assertTrue(all(e['ts'].endswith('Z') for e in lines))
+
     async def test_unexpected_backend_data_ends_job(self):
         async def odd(request):
             return httpx.Response(200, text='data: 5\n\ndata: [DONE]\n\n')
@@ -338,7 +361,12 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("OLLAMA_KV_CACHE_TYPE=f16", Settings.read({'OLLAMA_KV_CACHE_TYPE': 'f16'}).shell())
         self.assertEqual(Settings.read({}).max_image, 16777216)
         self.assertEqual(Settings.read({'QUEUE_MAX_IMAGE_BYTES': '0'}).max_image, 0)
-        for env in ({'MODE': 'oops'}, {'INFERENCE_BACKEND': 'other'}, {'QUEUE_ACTIVE': '0'}, {'QUEUE_MAX_IMAGE_BYTES': '-1'},
+        self.assertEqual(Settings.read({}).audit_log, '')
+        self.assertEqual(Settings.read({'MODE': 'server'}).audit_log, str(ROOT / 'logs/gateway-audit.log'))
+        self.assertEqual(Settings.read({'MODE': 'server', 'GATEWAY_AUDIT_LOG': '0'}).audit_log, '')
+        self.assertEqual(Settings.read({'MODE': 'server', 'GATEWAY_AUDIT_LOG': ''}).audit_log, str(ROOT / 'logs/gateway-audit.log'))
+        self.assertNotEqual(Settings.read({'GATEWAY_AUDIT_LOG': '1'}).audit_log, '')
+        for env in ({'MODE': 'oops'}, {'GATEWAY_AUDIT_LOG': 'yes'}, {'INFERENCE_BACKEND': 'other'}, {'QUEUE_ACTIVE': '0'}, {'QUEUE_MAX_IMAGE_BYTES': '-1'},
                     {'WEBUI_HOST': '0.0.0.0'}, {'OLLAMA_BASE_URL': 'https://external.test'},
                     {'EMBED_MODEL': 'other'}, {'INFERENCE_BACKEND': 'unsupported'},
                     {'LLAMA_ARG_CTX_CHECKPOINTS': '-1'}, {'LLAMA_ARG_CACHE_RAM': '1g'},

@@ -67,7 +67,7 @@ When upgrading from the direct Ollama proxy configuration, remove `/ollama-embed
 
 ## 4. Grant team access
 
-1. Open the private HTTPS endpoint and create the administrator account.
+1. Open the private HTTPS endpoint and create the administrator account. In server mode new passwords need at least 15 characters and logins last 12 hours; to sign people in through your identity provider (OIDC, with MFA) instead, see [Identity](compliance.md#identity-sign-in-and-sessions).
 2. Create or approve an Open WebUI account for each team member.
 3. Have each member generate a personal API key in **Settings → Account → API Keys**.
 4. Configure the editor with API base `https://ai.internal.example/v1` and model `coder-server:latest`.
@@ -145,6 +145,13 @@ Edit settings in `.env`; [.env.example](../.env.example) contains the complete l
 | `OLLAMA_KV_CACHE_TYPE` | `q8_0` | Ollama's KV cache (the model's context memory) in 8 bits; `f16` or empty keeps Ollama's default. Applied by `setup.sh` with the `LLAMA_ARG_*` cache limits; restart Ollama afterwards |
 | `OLLAMA_NUM_PARALLEL` | `2` | Conversation slots per model, each with its own KV cache. Applied by `setup.sh` like the line above. On a shared server, raise it to keep more users' conversations cached, as memory allows. Requests beyond it wait inside Ollama, so a `QUEUE_ACTIVE` above it adds no concurrency |
 | `LLAMA_ARG_CACHE_RAM` | `512` | MiB of RAM for saved prompt states (llama-server's prompt cache); with `LLAMA_ARG_CTX_CHECKPOINTS` (`4`) |
+| `GATEWAY_AUDIT_LOG` | on in server mode | One JSON line per request and per finished job in `logs/gateway-audit.log` (time, account, endpoint, model, outcome; no content). `0` turns it off |
+| `AUDIT_LOG_LEVEL` | `METADATA` in server mode | Open WebUI's audit log of sign-in attempts and changes, without bodies, in `data/openwebui/audit.log`. `NONE` turns it off |
+| `JWT_EXPIRES_IN` | `12h` in server mode | Login lifetime (Open WebUI's own default is `4w`) |
+| `ENABLE_PASSWORD_VALIDATION` | `true` in server mode | New passwords need 15+ characters (`PASSWORD_VALIDATION_REGEX_PATTERN='^.{15,}$'`) |
+| `WEBUI_SESSION_COOKIE_SECURE` | `true` in server mode | Login cookies over HTTPS only |
+
+The last five apply in server mode unless `.env` sets them; [compliance notes](compliance.md) explain each, and how to sign users in through your identity provider (OIDC) instead.
 
 **KV cache in 8 bits (measured 2026-10-24, `coder-local` on a 16 GB Mac, Ollama 0.35).** Ollama passes `--cache-type-k q8_0 --cache-type-v q8_0` to llama-server, which needs flash attention (on automatically). The KV cache went from 1,092 to 580 MiB and each context checkpoint from 320 to 170 MiB (up to 4 are kept), so 0.5 to 1.1 GB less in all. Speed showed no consistent difference. Output is not identical: with fixed sampling (temperature 0, fixed seed), f16 repeated itself exactly on 4 prompts, and q8_0 matched it on a short prompt and a 6,400-token one but chose a different word early on 5,300- and 11,300-token prompts ("document" for "report") and continued from there. No loss of quality was visible; Ollama's FAQ calls it "a very small loss in precision" that "usually has no noticeable impact". `q4_0` (a quarter of the memory) has a larger loss and wasn't tested. The model's weights (7 GB) and context length are unchanged.
 
@@ -185,3 +192,5 @@ Supply a stable `Idempotency-Key` when submitting a job. Within its retention pe
 
 - [Editor configuration](editors.md)
 - [Privacy and outbound traffic](privacy.md)
+- [Compliance notes for regulated environments](compliance.md)
+- [Comparison with similar projects](comparison.md)

@@ -2,7 +2,7 @@
 
 Run a local or shared coding assistant with Ollama. A common inference gateway supplies bounded per-user queues, while Open WebUI, Brave Search (MCP) and an ACP agent (`acp-bridge`) for Xcode, Android Studio and VS Code provide the user interfaces.
 
-See [server setup and Mac testing](docs/server.md) for Ollama deployment and queue limitations.
+See [server setup and Mac testing](docs/server.md) for Ollama deployment and queue limitations, and [how this compares](docs/comparison.md) for similar projects and what this stack does differently. For regulated environments, including U.S. federal agencies and their contractors, the [compliance notes](docs/compliance.md) map the stack to the requirements that apply and list what the deploying organization still owns.
 
 ## Before you start
 
@@ -39,7 +39,7 @@ If you already have a `.env`, keep it. Open `.env` and confirm `MODE=local`. Set
 ./scripts/setup.sh --editors
 ```
 
-This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-text`), Open WebUI, and the Whisper small model for Open WebUI's voice input (downloaded once to `data/whisper/` and checked against pinned hashes). On macOS it also builds the IDE agent (`acp-bridge`, which Xcode, Android Studio and VS Code run) from source, which needs Rust — see the [prerequisites](#one-time-prerequisites). Nothing is written to your editors' settings; setup prints what to enter.
+This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-text`), Open WebUI, and the Whisper small model for Open WebUI's voice input (downloaded once to `data/whisper/` and checked against pinned hashes). On macOS it also builds the IDE agent (`acp-bridge`, which Xcode, Android Studio and VS Code run) from source, which needs Rust — see the [prerequisites](#one-time-prerequisites). Nothing is written to your editors' settings; setup prints what to enter. Each run also writes a software bill of materials of everything it installed to `build/sbom.cdx.json` (CycloneDX).
 
 Every run of `setup.sh` also limits how much RAM Ollama spends caching prompts (`LLAMA_ARG_*` in `.env`; by default it could use about 8 GB, enough to push a 16 GB Mac into swap), stores the model's context memory in 8 bits (`OLLAMA_KV_CACHE_TYPE=q8_0`, about 0.5 to 1.1 GB less), and gives the model two conversation slots (`OLLAMA_NUM_PARALLEL=2`) so Open WebUI's background calls don't push your chat out of its cache. See [docs/server.md](docs/server.md#configuration-reference) for what each changes. None of them shortens the model's context. On macOS it adds a login item that keeps these settings after a restart. When setup says so, quit and reopen the Ollama app once.
 
@@ -122,7 +122,7 @@ These commands do not start or stop Ollama. If startup fails, check `logs/gatewa
   zsh ./scripts/install-homebrew.sh
   ```
   (a local copy of the official `https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh` installer — equivalent to piping that URL straight into bash, kept here so onboarding doesn't depend on fetching it fresh each time). Then add it to your shell (the installer prints the exact line; on Apple Silicon it's `eval "$(/opt/homebrew/bin/brew shellenv)"`, which needs to go in `~/.zprofile` to persist across terminal sessions).
-- **`uv` and Node.js** (Node provides `npx`, used to run the Brave MCP server): `brew install uv node`.
+- **`uv` and Node.js** (Node runs the Brave MCP server, which setup installs with npm from a pinned lockfile; only needed with a `BRAVE_API_KEY`): `brew install uv node`.
 - **Rust 1.86 or newer** (only for `--editors` on macOS, to build the IDE agent for Xcode, Android Studio and VS Code): install it with rustup (https://rustup.rs) — `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` — then open a new terminal. If Rust is already installed, run `rustup update`.
 
 
@@ -142,7 +142,7 @@ For the shared `coder-server` deployment, see [docs/server.md](docs/server.md). 
 
 ## Project rules and privacy
 
-See [AGENTS.md](AGENTS.md) for the project rules, [docs/privacy.md](docs/privacy.md) for the existing privacy notes and earlier network observations, and [docs/editors.md](docs/editors.md) for detailed IDE setup.
+See [AGENTS.md](AGENTS.md) for the project rules, [docs/privacy.md](docs/privacy.md) for the existing privacy notes and earlier network observations, [docs/editors.md](docs/editors.md) for detailed IDE setup, [docs/compliance.md](docs/compliance.md) for regulated environments (federal requirements, NIST control mapping, audit logs, sign-in), and [docs/comparison.md](docs/comparison.md) for how this stack compares to similar projects. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Running the tests (no GPU needed)
 
@@ -157,3 +157,7 @@ For live queue testing use the existing local Ollama model with `QUEUE_ACTIVE=1`
 The IDE agents use `LLM_QUEUE=1` to show waiting/running status and reconnect to
 jobs. Open WebUI and the IDEs' plain-chat providers receive standard streaming
 responses and keepalives; they don't display queue positions. See [editor limitations](docs/editors.md).
+
+## License
+
+Apache License 2.0 (see [LICENSE](LICENSE)). [NOTICE](NOTICE) lists the third-party material in this repository; the components setup installs keep their own licenses, listed in `build/sbom.cdx.json`.

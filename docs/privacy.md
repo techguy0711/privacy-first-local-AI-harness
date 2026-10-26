@@ -78,7 +78,15 @@ Continue is retired: its repository is read-only and 2.0.0 was its last release 
   - Speech-to-Text Engine **Web API** uses the browser's speech recognition, which in Chrome sends the audio to Google (in Safari, to Apple unless dictation runs on-device).
   - Text-to-Speech Engine **Kokoro.js (Browser)** downloads the Kokoro-82M model and voices from `huggingface.co` into the browser, and its ONNX runtime from `cdn.jsdelivr.net`. Kokoro is not on the allowlist.
   - **Allow non-local voices**, as above.
-- **Voice activity detection stays off** (`WHISPER_VAD_FILTER=false`): it would load Silero's VAD model, which ships inside faster-whisper and is not on the allowlist.
+- **Voice activity detection stays off** (`WHISPER_VAD_FILTER=false`): it would load Silero's VAD model, which ships inside faster-whisper and is not on the allowlist. Since 2026-10-25 `setup.sh` also deletes that model file from the venv (next section).
+
+## Supply chain and audit logs (2026-10-25)
+
+- **The Brave MCP server no longer comes from npm at start.** `stack.sh` used to start it with `npx -y @brave/brave-search-mcp-server@2.1.4`, which contacted `registry.npmjs.org` on every start (1 connection once cached; see the 2026-10-06 audit below) and fetched whatever the package's dependency ranges resolved to on first use. Now `setup.sh` installs it once into `build/brave-mcp/` with `npm ci --ignore-scripts` from `services/brave-mcp/package-lock.json`, which pins all 97 packages to exact versions and sha512 hashes (the same tree the npx cache held), and `stack.sh` runs `node` on it. Checked with `lsof` after `stack.sh up`: the server's only socket was its listener on `127.0.0.1:8765`. At runtime the only outside host is again `api.search.brave.com`, during a search.
+- **It no longer sees the other secrets.** The server calls `dotenv.config()` (`dist/config.js`), which reads a `.env` from the working directory, and `stack.sh` started it from the repo, so every value in this repo's `.env` (`WEBUI_SECRET_KEY`, `GATEWAY_SERVICE_KEY`, …) was in its environment; `stack.sh`'s `set -a` exported them to it as well. It now starts in `build/brave-mcp/` with only `PATH`, `HOME`, `BRAVE_API_KEY` and `BRAVE_MCP_ENABLED_TOOLS` (checked with `ps eww`). Nothing suggests it sent them anywhere; this removes the exposure.
+- **Silero's VAD model is deleted.** `faster_whisper/assets/silero_vad_v6.onnx` (1.2 MB) was the only model file in Open WebUI's venv after `rapidocr` was left out (a search for `.onnx`, `.safetensors`, `.pt`, `.gguf` and similar). It is outside the allowlist and Open WebUI never loads it with `WHISPER_VAD_FILTER=false` (it calls plain `WhisperModel.transcribe`), so `setup.sh` deletes it after each install and `doctor.sh` fails if it is back.
+- **Audit logs (server mode by default).** The gateway writes `logs/gateway-audit.log` and Open WebUI `data/openwebui/audit.log` (`docs/compliance.md`, "Audit logs"). Neither holds prompts, code or replies, but both identify people: account IDs in the gateway's, and names, email addresses and source IPs in Open WebUI's. They stay on the server, owner-only, and are never deleted by the stack; they leave the machine only if an operator forwards them.
+- **SBOM.** `setup.sh` writes `build/sbom.cdx.json` (CycloneDX 1.6, `scripts/sbom.py`): every Python package in Open WebUI's venv, the Brave server's npm packages with their sha512, acp-bridge's commit, patches and crates, Ollama's version and each model's digest and license, and the Whisper files' SHA-256. It reads only local files and Ollama's API on loopback.
 
 ## Confirmed env vars (verified against current docs and a live run, 2026-10-06)
 
@@ -130,7 +138,7 @@ Both were caught by actually running the stack end-to-end, not just reading docs
 | Source | Outside connections | Verdict |
 |---|---|---|
 | Open WebUI and gateway (39 hook events) | none: loopback only, no outside name lookups (the other events: `uname -p` and `file -b` at startup, Python's platform detection) | clean |
-| Brave MCP server (`node`, lsof) | `registry.npmjs.org` when `npx` starts it (the launch-time check below); `api.search.brave.com` (15.197.138.111:443) during the search | as expected |
+| Brave MCP server (`node`, lsof) | `registry.npmjs.org` when `npx` starts it (the launch-time check below; gone since 2026-10-25); `api.search.brave.com` (15.197.138.111:443) during the search | as expected |
 | Browser, UI (237 requests) | none: everything from `127.0.0.1:3999`, fonts included | clean |
 
 **What 0.12.3 changed for this stack**, each handled in `stack.sh`, `setup.sh` or the gateway:
@@ -138,7 +146,7 @@ Both were caught by actually running the stack end-to-end, not just reading docs
 - A tool server without access grants is admin-only, hence the grant in `TOOL_SERVER_CONNECTIONS`.
 - Open WebUI embeds a document by sending all its chunks at once (`RAG_EMBEDDING_CONCURRENT_REQUESTS=0`), which the gateway's per-account limit refuses (10 simultaneous requests from one account: 8 got 429). `stack.sh` sets one request at a time, 32 chunks each; the 45-chunk document then embedded in 3 s.
 - Open WebUI's model API is async, so `stack.sh`'s default-tools step awaits it.
-- `rapidocr`, an open-webui dependency, bundles Baidu's PaddleOCR models (`PP-OCRv6_det/rec`, `ch_ppocr_cls`) and points at `modelscope.cn` for more; 0.6.31 shipped them as well (`rapidocr_onnxruntime`, PP-OCRv4). They only serve OCR of images in PDFs (`PDF_EXTRACT_IMAGES`, off), so `setup.sh` installs Open WebUI without them (hard rule 1) and `doctor.sh` checks. The only other bundled model is Silero's voice activity detector in `faster_whisper`, which stays off (`WHISPER_VAD_FILTER=false`; "Voice input" above).
+- `rapidocr`, an open-webui dependency, bundles Baidu's PaddleOCR models (`PP-OCRv6_det/rec`, `ch_ppocr_cls`) and points at `modelscope.cn` for more; 0.6.31 shipped them as well (`rapidocr_onnxruntime`, PP-OCRv4). They only serve OCR of images in PDFs (`PDF_EXTRACT_IMAGES`, off), so `setup.sh` installs Open WebUI without them (hard rule 1) and `doctor.sh` checks. The only other bundled model is Silero's voice activity detector in `faster_whisper`, which stays off (`WHISPER_VAD_FILTER=false`; "Voice input" above) and since 2026-10-25 is deleted by `setup.sh`.
 
 **New in 0.12.3, checked**: the model's built-in `fetch_url` and `search_web` tools exist only with `ENABLE_WEB_SEARCH` on, and `notify` only with user webhooks on; the version check needs `ENABLE_VERSION_UPDATE_CHECK`, the license check a `LICENSE_KEY`; tool and function requirement installs are skipped under `OFFLINE_MODE`; terminals need configured terminal servers (none). `ENABLE_FORWARD_USER_INFO_HEADERS` now also sends the user's name, e-mail, role and chat ID to tool servers, with no per-server switch; the local Brave server doesn't pass them on (its code sends Brave only the query and its own key).
 
@@ -155,12 +163,12 @@ Exercised: chat completion, RAG (file upload → Knowledge → grounded query), 
 | Brave web search (`brave_web_search` tool, real query) | Brave's Search API | **Confirmed functionally** — each call returned fresh, query-specific real results (e.g. actual current Continue.dev docs content, actual Open WebUI release notes) that could only come from a live call to Brave. Could not capture the literal socket in an `lsof`/`nettop` snapshot — each request's connection closes in well under 300ms, and this environment has no root for a packet-level capture. Functional verification is the evidence here, not a packet trace. |
 | Idle (nothing running) | none | Both `ollama pull`-derived and `npx`-derived connections closed within ~15s of idling. |
 
-**Net result**: at runtime, the only host ever contacted was Brave's Search API, triggered only by an actual search tool call. Everything else was either loopback-only or a one-time setup/launch-time registry fetch (Ollama's model registry, npm's package registry) — exactly the "Expected" list in the spec, nothing more.
+**Net result**: at runtime, the only host ever contacted was Brave's Search API, triggered only by an actual search tool call. Everything else was either loopback-only or a one-time setup/launch-time registry fetch (Ollama's model registry, npm's package registry) — exactly the "Expected" list in the spec, nothing more. (Since 2026-10-25 npm is contacted only by `setup.sh`, not at launch.)
 
 ### How to disable each
 
 - Brave search entirely: leave `BRAVE_API_KEY` empty in `.env` — `stack.sh` skips launching the Brave MCP server and `doctor.sh` reports `disabled: no key`. For the Xcode agent alone: `LLM_WEB_SEARCH=off` in its env vars in Xcode.
-- The npm registry check on Brave MCP launch: pre-warm npm's cache once (`npm view @brave/brave-search-mcp-server@2.1.4` or just let the first `stack.sh up` do it) — subsequent launches hit the local npm cache first and only do a brief version check.
+- The npm registry check on Brave MCP launch: gone since 2026-10-25. `setup.sh` installs the server from `services/brave-mcp/package-lock.json` and `stack.sh` starts it with `node`, so npm is contacted only by that install ("Supply chain and audit logs" above).
 - Ollama's registry traffic: only happens during `ollama pull`, which `setup.sh` runs only for a model that isn't installed yet (since 2026-10-14; before that every run checked each manifest with the registry). Re-runs don't contact the registry, so a tag that moves upstream (e.g. a re-published `gemma4:12b`) changes nothing here until you pull it yourself; then rebuild the derived model on it with `ollama create coder-<mode> -f Modelfile.<mode>`.
 
 ## Localhost-only binding (local mode) — confirmed live

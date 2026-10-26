@@ -81,6 +81,7 @@ class Settings:
     cache_ram: str
     kv_cache_type: str
     num_parallel: str
+    audit_log: str
 
     @classmethod
     def read(cls, env=None):
@@ -100,6 +101,11 @@ class Settings:
         for name in ('WEBUI_HOST', 'BRAVE_MCP_HOST'):
             if e.get(name, '127.0.0.1') != '127.0.0.1':
                 raise ValueError(f'{name} must remain 127.0.0.1; use the private TLS proxy')
+        # Metadata audit trail (who, when, what, outcome; never content), on by
+        # default for a shared server.
+        audit = e.get('GATEWAY_AUDIT_LOG') or ('1' if mode == 'server' else '0')
+        if audit not in ('0', '1'):
+            raise ValueError('GATEWAY_AUDIT_LOG must be 0 or 1')
         return cls(mode, backend, f'coder-{mode}:latest', upstream, ollama,
                    f"http://127.0.0.1:{positive(e, 'WEBUI_PORT', 3000)}",
                    f"http://127.0.0.1:{positive(e, 'GATEWAY_PORT', 8787)}",
@@ -115,7 +121,8 @@ class Settings:
                    # its slots per model, applied to Ollama by setup.sh.
                    optional_int(e, 'LLAMA_ARG_CTX_CHECKPOINTS', '4', 0),
                    optional_int(e, 'LLAMA_ARG_CACHE_RAM', '512', -1), kv_cache_type(e),
-                   optional_int(e, 'OLLAMA_NUM_PARALLEL', '2', 1))
+                   optional_int(e, 'OLLAMA_NUM_PARALLEL', '2', 1),
+                   str(ROOT / 'logs/gateway-audit.log') if audit == '1' else '')
 
     def shell(self):
         import shlex

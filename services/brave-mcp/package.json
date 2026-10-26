@@ -1,0 +1,9 @@
+{
+  "name": "local-ai-harness-brave-mcp",
+  "private": true,
+  "description": "Pinned Brave Search MCP server for scripts/stack.sh, installed by scripts/setup.sh with npm ci",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@brave/brave-search-mcp-server": "2.1.4"
+  }
+}
