@@ -1526,10 +1526,31 @@
  }
 --- a/src/llm.rs
 +++ b/src/llm.rs
-@@ -1066,6 +1066,98 @@ pub async fn chat_with_options(
+@@ -804,7 +804,7 @@ impl LlmError {
+             LlmErrorKind::Unknown
+         };
+         let message = if matches!(kind, LlmErrorKind::Unreachable) {
+-            format!("Cannot reach backend at {url}: {e}")
++            format!("Cannot reach backend at {url}: {}", error_chain(e))
+         } else {
+             format!("{e}")
+         };
+@@ -1066,6 +1066,130 @@ pub async fn chat_with_options(
      })
  }
  
++/// An error with its causes: reqwest's own message stops at "error sending
++/// request for url", which hides e.g. "invalid peer certificate: UnknownIssuer".
++fn error_chain(e: &dyn std::error::Error) -> String {
++    let mut text = e.to_string();
++    let mut source = e.source();
++    while let Some(cause) = source {
++        text = format!("{text}: {cause}");
++        source = cause.source();
++    }
++    text
++}
++
 +/// Queue-aware transport. Status is reported separately from model messages.
 +/// A stable key makes submission retries safe; polling reconnects to the same job.
 +pub async fn queued_chat(
@@ -1553,6 +1574,7 @@
 +    let mut id: Option<String> = None;
 +    let mut previous = String::new();
 +    let mut failures = 0;
++    let mut cause = String::new();
 +    let work = async {
 +        loop {
 +            let request = if let Some(ref jid) = id {
@@ -1565,7 +1587,19 @@
 +                Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
 +                Ok(r) if r.status().is_server_error() => None,
 +                Ok(r) => return Err(fail(format!("Queue rejected request (HTTP {}); retry later", r.status()))),
-+                Err(_) => None,
++                Err(e) => {
++                    cause = error_chain(&e);
++                    // A certificate this machine doesn't trust fails the TLS
++                    // handshake, so nothing reached the server, and fails the
++                    // same way on every retry.
++                    if cause.contains("certificate") {
++                        return Err(fail(format!(
++                            "Cannot connect to {base}: {cause}. Trust the server's certificate authority \
++                             in the keychain, or set SSL_CERT_FILE to its certificate (docs/editors.md)."
++                        )));
++                    }
++                    None
++                }
 +            };
 +            if let Some(value) = value {
 +                failures = 0;
@@ -1599,7 +1633,14 @@
 +                }
 +            } else {
 +                failures += 1;
-+                if failures >= 5 { return Err(fail("Queue connection lost; request may still be running until its deadline.".into())); }
++                if failures >= 5 {
++                    return Err(fail(if id.is_none() && !cause.is_empty() {
++                        // No job yet, so none is known to be running.
++                        format!("Cannot reach the inference server at {base}: {cause}")
++                    } else {
++                        "Queue connection lost; request may still be running until its deadline.".into()
++                    }));
++                }
 +                if failures == 1 {
 +                    previous = "Reconnecting to the same queued request…".to_string();
 +                    status(previous.clone());
@@ -1625,7 +1666,7 @@
  /// Stream chat completion — auto-detects backend and uses appropriate parser.
  pub async fn stream_chat(
      config: &LlmConfig,
-@@ -1312,6 +1404,101 @@ mod tests {
+@@ -1312,6 +1436,101 @@ mod tests {
          format!("http://{addr}")
      }
  

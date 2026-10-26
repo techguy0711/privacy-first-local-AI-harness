@@ -153,7 +153,7 @@ The Ollama checks there describe the container, not the Mac's Ollama (its Ollama
 
 The server's `.env`, its data and its logs live in a Docker volume (the `harness` account's home, with the checkout in `~/stack`), never in this repo; the image is built from the files a fresh clone has (`.dockerignore`, and the build stops if `.env` or `data/` got in), so the Mac's `.env` and chats stay out of it.
 
-**The IDE agents can't connect to it yet.** acp-bridge trusts only public certificate authorities (its HTTP client is built with `rustls` and the built-in Mozilla roots), so it rejects this test CA, and would reject a team's private CA the same way. Browsers and `curl --cacert` work.
+**IDE agents.** Register the agent as `./scripts/setup.sh --editors` prints it on the Mac (local mode), with these environment values instead: `LLM_BASE_URL=https://localhost:8443/v1`, `LLM_MODEL=coder-server:latest`, `LLM_MODEL_CONTEXT=16384`, `LLM_API_KEY` set to your personal key from the test server, and `SSL_CERT_FILE` set to the full path of `server-test/test-ca.crt`; `LLM_QUEUE` and `LLM_TIMEOUT` stay as printed. Instead of `SSL_CERT_FILE` you can trust that certificate in your login keychain; with the repo under `~/Downloads`, macOS may first ask whether acp-bridge may read the file. Checked on 2026-10-26 by driving the VS Code agent's config over ACP: a turn completed through the queue, and without the certificate the agent stopped at once with `invalid peer certificate: UnknownIssuer` ([editor guide](editors.md#queue-aware-xcode-transport-2026-10-11), "Server certificates"). Not yet tried from Xcode, Android Studio or VS Code themselves.
 
 ## Operations
 

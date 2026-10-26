@@ -177,6 +177,22 @@ printed by setup. Endpoints are `http://127.0.0.1:8787/v1` locally or
 supply it through your existing editor environment mechanism; never put it in
 committed config. The internal gateway service key is not an editor credential.
 
+**Server certificates** (2026-10-26). The agent checks the server's certificate
+against Mozilla's public roots and the certificates the Mac's keychains trust
+(login, System, and any your organization installs by MDM). When `SSL_CERT_FILE`
+is set in the agent's environment, it uses that file (PEM) instead of the
+keychains, still alongside Mozilla's roots. So a server whose certificate comes
+from a team's private certificate authority works once that authority is trusted
+on the Mac, or with `SSL_CERT_FILE` set to its certificate. The check runs on the
+Mac and makes no revocation lookups (OCSP, CRL), which the system's own verifier
+would: `acp-bridge.patch` adds reqwest's `rustls-tls-native-roots`
+(`rustls-native-certs`), not `rustls-platform-verifier`. An untrusted certificate
+ends the request at once with `invalid peer certificate: UnknownIssuer` and how to
+fix it, and a server that can't be reached reports why (for example
+`Connection refused`) instead of "Queue connection lost". Android Studio's model
+providers and Xcode's plain chat use their own trust settings and were not tried
+with a private certificate authority.
+
 The bridge submits a job with a stable idempotency key and polls its status. It
 reports only real waits: a job still queued when polled (with its position), and
 its start after such a wait. A job that starts at once, the usual case locally, is
