@@ -1,5 +1,35 @@
 # Privacy: confirmed env vars, and the live egress audit
 
+## Before a release: one capture of the whole stack
+
+The sections below were checked one change at a time between 2026-10-06 and 2026-10-26, mostly with `lsof` samples, which miss short connections; several are marked "not yet audited live". Before tagging a release, run one packet capture on the release commit, with every client in use, and record the result here.
+
+Capture everything that isn't loopback, with the sending process attached (macOS `tcpdump` on the `pktap` interface, run in a separate terminal; it needs `sudo`):
+
+```bash
+sudo tcpdump -i pktap,all -w ~/egress.pcapng 'not host 127.0.0.1 and not host ::1'
+```
+
+While it runs, on the release commit (`git rev-parse HEAD`):
+
+1. `./scripts/stack.sh up`, then `./scripts/doctor.sh`.
+2. Open WebUI in the browser: a chat with Brave Search off; one with it on, asking about a recent release of a tool; a PDF uploaded and asked about; an attached screenshot; one dictation with the microphone and one turn in call mode. Afterwards `data/openwebui/cache/audio/transcriptions/` should be empty.
+3. Xcode agent: a session that edits a file, builds, and runs one `web_search`.
+4. Android Studio: a prompt in the Agent tab through the Local Provider that would tempt it to search the web, and one that uses the Android docs tools; a session with the ACP agent that runs a Gradle build.
+5. VS Code: an ACP Client session that runs a build.
+6. Leave everything open and idle for 10 minutes, `./scripts/stack.sh down`, then stop the capture (Ctrl-C).
+
+Read it with process names, then the names looked up:
+
+```bash
+tcpdump -nn -k NP -r ~/egress.pcapng | less
+tcpdump -nn -r ~/egress.pcapng port 53
+```
+
+**Pass**: the stack's own processes (Ollama, the venv's Python running Open WebUI and the gateway, `node` running the Brave server, `acp-bridge`) reach only `api.search.brave.com`, from `node`, during searches. Any other host from them fails the release. Traffic from the IDEs and the browser to their vendors is expected; compare it with the sections below and add any new host there.
+
+Record the date, the commit and the versions in `build/sbom.cdx.json`, with a table like the 2026-10-06 one below, and replace each "not yet audited live" note the run covers. The capture holds everything the Mac sent in that time: keep it out of the repo and delete it once recorded.
+
 ## Xcode ACP agent: OpenCode rejected, acp-bridge chosen (verified live, 2026-10-06)
 
 Xcode 27 added ACP (Agent Client Protocol) agent support, which requires a locally-running adapter process since ACP agents must implement their own full agentic loop (ACP doesn't proxy raw completions). Two candidates were evaluated for bridging this to our local Ollama model:
@@ -153,6 +183,8 @@ Both were caught by actually running the stack end-to-end, not just reading docs
 **New in 0.12.3, checked**: the model's built-in `fetch_url` and `search_web` tools exist only with `ENABLE_WEB_SEARCH` on, and `notify` only with user webhooks on; the version check needs `ENABLE_VERSION_UPDATE_CHECK`, the license check a `LICENSE_KEY`; tool and function requirement installs are skipped under `OFFLINE_MODE`; terminals need configured terminal servers (none). `ENABLE_FORWARD_USER_INFO_HEADERS` now also sends the user's name, e-mail, role and chat ID to tool servers, with no per-server switch; the local Brave server doesn't pass them on (its code sends Brave only the query and its own key).
 
 ## Live egress audit (performed 2026-10-06, macOS, `lsof -nP -i`)
+
+This audit predates Open WebUI 0.12.3, the pinned Brave server, voice input and the VS Code and Android Studio agents; the release capture at the top of this page replaces it.
 
 Exercised: chat completion, RAG (file upload → Knowledge → grounded query), and a real Brave web search tool call, each while watching the relevant process's open connections.
 

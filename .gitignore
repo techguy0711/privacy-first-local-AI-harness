@@ -23,6 +23,9 @@ server-test/test-ca.crt
 # Backups made by setup.sh before overwriting files outside the repo
 *.bak
 
+# Personal Claude Code settings
+.claude/settings.local.json
+
 # OS cruft
 .DS_Store
 

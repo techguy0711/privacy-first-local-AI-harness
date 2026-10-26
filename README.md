@@ -161,4 +161,4 @@ responses and keepalives; they don't display queue positions. See [editor limita
 
 ## License
 
-Apache License 2.0 (see [LICENSE](LICENSE)). [NOTICE](NOTICE) lists the third-party material in this repository; the components setup installs keep their own licenses, listed in `build/sbom.cdx.json`.
+Apache License 2.0 (see [LICENSE](LICENSE)). [NOTICE](NOTICE) lists the third-party material in this repository; the components setup installs keep their own licenses, listed in `build/sbom.cdx.json` and summarized in [docs/compliance.md](docs/compliance.md#software-components). Two of them aren't OSI-approved open source: Open WebUI's license forbids changing its branding in a deployment of more than 50 users without Open WebUI Inc.'s permission, and the Llama models used in server mode come under Meta's community license.

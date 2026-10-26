@@ -41,7 +41,9 @@ def python_packages():
         norm = re.sub(r'[-_.]+', '-', name).lower()
         meta_license = dist.metadata.get('License-Expression') or dist.metadata.get('License') or ''
         if '\n' in meta_license or len(meta_license) > 80:
-            meta_license = ''
+            # The whole license text: keep its title ("Open WebUI License"), not a copyright line.
+            first = (meta_license.strip().splitlines() or [''])[0].strip()
+            meta_license = first if 'license' in first.lower() and len(first) <= 80 else ''
         purl = f'pkg:pypi/{norm}@{version}'
         out.append({'type': 'library', 'bom-ref': purl, 'name': norm, 'version': version, 'purl': purl,
                     'licenses': license_of(meta_license)})
