@@ -24,6 +24,7 @@ server-test/test-ca.crt
 *.bak
 
 # Personal Claude Code settings
+.claude/settings.json
 .claude/settings.local.json
 
 # OS cruft

@@ -117,10 +117,10 @@ Against the [AI RMF](https://www.nist.gov/itl/ai-risk-management-framework) and 
 
 ## Residual risks
 
-- **Agent shell commands.** The IDE agents' `bash` tool runs the commands the model writes, in the project folder, without a sandbox or confirmation (the IDE shows each one). The prompt forbids network commands; code doesn't enforce that. Use the agents on code cleared for it and watch the commands they run ([privacy.md](privacy.md#xcode-agent-patched-acp-bridge-what-can-leave-the-mac)).
-- **The IDEs' own traffic.** Xcode, Android Studio and VS Code contact their vendors for updates, feature flags and documentation indexes, separately from the model. [privacy.md](privacy.md) lists what was observed and which settings to turn off (Share Mac Analytics, Android Studio's Data Sharing, VS Code telemetry).
+- **Agent shell commands.** The IDE agents' `bash` tool runs the commands the model writes, in the project folder, without a sandbox or confirmation (the IDE shows each one). The prompt forbids network commands; code doesn't enforce that. Use the agents on code cleared for it and watch the commands they run ([privacy.md](privacy.md#the-bash-tool)).
+- **The IDEs' own traffic.** Xcode, Android Studio and VS Code contact their vendors for updates, feature flags and documentation indexes, separately from the model. [privacy.md](privacy.md#the-ides-macos-and-the-browser) lists what was observed and which settings to turn off (Share Mac Analytics, Android Studio's Data Sharing, VS Code telemetry).
 - **Model quality.** Local models make mistakes, and the allowlist rules out some stronger open-weight models. Review generated code as you would any contribution.
-- **Not yet audited live.** Some paths are verified from source and tests only; [privacy.md](privacy.md) marks each one.
+- **Not yet audited live.** Some paths are verified from source and tests only; [privacy.md](privacy.md#not-yet-verified-live) lists them.
 
 ## Checklist for the deploying organization
 
