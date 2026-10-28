@@ -20,9 +20,11 @@
 # runs `npm run build`, which does whatever that script does, network
 # included (some frameworks send build telemetry) -- see docs/privacy.md.
 #
-# bash: as in config.toml, acp-bridge's `bash` tool runs whatever command the
-# model writes, in the project folder, without a sandbox. The prompt line
-# against network commands is an instruction to the model, not enforcement.
+# bash: as in config.toml, acp-bridge's `bash` tool runs the command the
+# model writes, in the project folder, without a sandbox, once you allow it in
+# VS Code ([permissions] below; the extension shows the choice as a quick pick
+# unless "acp.autoApprovePermissions" is "allowAll"). The prompt line against
+# network commands is an instruction to the model, not enforcement.
 
 [llm]
 # No temperature on purpose (gemma4's own defaults; see config.toml).
@@ -56,6 +58,14 @@ max_reasoning_chars = 12000
 
 [notes]
 enabled = true
+
+# Ask before each `bash` command: the IDE shows Allow / Always allow / Deny
+# (ACP session/request_permission). "Always allow" saves the command's prefix
+# ("git status", "cargo test", "ls") for the project in
+# <state_dir>/allowed-commands.json; delete an entry there to revoke it.
+# LLM_CONFIRM_BASH=0 in the agent's env runs commands without asking.
+[permissions]
+confirm_bash = true
 
 # Detects the build from the project root (see the header). Defaults
 # otherwise (3 builds, 300 s).

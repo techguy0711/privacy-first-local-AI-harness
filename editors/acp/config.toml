@@ -24,9 +24,10 @@
 # 0.35's gemma4 parser then drops the whole reply ("gemma4 tool call parsing
 # failed" in ~/.ollama/logs/server.log). Every successful round was one call.
 #
-# bash: acp-bridge's `bash` tool runs whatever command the model writes, in
-# the project folder, without a sandbox (upstream behaviour). The prompt line
-# against network commands is an instruction to the model, not enforcement --
+# bash: acp-bridge's `bash` tool runs the command the model writes, in the
+# project folder, without a sandbox, once you allow it in Xcode ([permissions]
+# below). The prompt line against network commands is an instruction to the
+# model, not enforcement; the permission question is where you catch one --
 # see docs/privacy.md.
 
 [llm]
@@ -78,6 +79,14 @@ max_reasoning_chars = 12000
 # Working memory: `notes` tool + summaries of rounds dropped from the context.
 [notes]
 enabled = true
+
+# Ask before each `bash` command: the IDE shows Allow / Always allow / Deny
+# (ACP session/request_permission). "Always allow" saves the command's prefix
+# ("git status", "cargo test", "ls") for the project in
+# <state_dir>/allowed-commands.json; delete an entry there to revoke it.
+# LLM_CONFIRM_BASH=0 in the agent's env runs commands without asking.
+[permissions]
+confirm_bash = true
 
 [mcp]
 client_servers = "allowlist"

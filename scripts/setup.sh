@@ -442,8 +442,9 @@ EOF
   # Xcode ACP agent (macOS only -- Xcode doesn't exist elsewhere). Built from
   # source: upstream tag v$ACP_BRIDGE_VERSION (must be commit $ACP_BRIDGE_COMMIT)
   # plus editors/acp/acp-bridge.patch (Xcode tools, guarded Brave search,
-  # build-and-fix loop, saved sessions -- see docs/editors.md). Pins, patch,
-  # cargo and the stamp were checked at the top (ACP_BUILD_NEEDED).
+  # build-and-fix loop, saved sessions, asking before shell commands -- see
+  # docs/editors.md). Pins, patch, cargo and the stamp were checked at the top
+  # (ACP_BUILD_NEEDED).
   if [[ "$(uname -s)" == "Darwin" ]]; then
     if ! $ACP_BUILD_NEEDED; then
       log "acp-bridge $ACP_BRIDGE_VERSION (+ editors/acp/acp-bridge.patch) already built at bin/acp-bridge"
@@ -578,10 +579,13 @@ when it has a build and sends the errors back to the model.
     }
   },
   "acp.logTraffic": false,
+  "acp.autoApprovePermissions": "ask",
   "telemetry.telemetryLevel": "off"
      The agent list replaces the extension's built-in agents (npx packages that
      talk to their own clouds). logTraffic off keeps prompts and code out of
-     VS Code's output panel; telemetry off also stops the extension's usage events.
+     VS Code's output panel; "ask" shows each shell command for Allow / Always
+     allow / Deny; telemetry off also stops the extension's usage events (they
+     include the command of each such question).
   3. Open "ACP Client" in the activity bar and connect to "$ACP_AGENT_NAME agent".
 Saved agent conversations: $REPO_ROOT/data/acp-bridge-vscode/
 Details: docs/editors.md (VS Code).

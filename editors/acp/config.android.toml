@@ -27,9 +27,10 @@
 # (allow_client_http defaults to false). Those tools are unverified for
 # privacy (the docs tools may reach Google; see docs/privacy.md).
 #
-# bash: as in config.toml, acp-bridge's `bash` tool runs whatever command the
-# model writes, in the project folder, without a sandbox. The prompt line
-# against network commands is an instruction to the model, not enforcement.
+# bash: as in config.toml, acp-bridge's `bash` tool runs the command the
+# model writes, in the project folder, without a sandbox, once you allow it in
+# Android Studio ([permissions] below). The prompt line against network
+# commands is an instruction to the model, not enforcement.
 
 [llm]
 # No temperature on purpose (gemma4's own defaults; see config.toml).
@@ -64,6 +65,14 @@ max_reasoning_chars = 12000
 
 [notes]
 enabled = true
+
+# Ask before each `bash` command: the IDE shows Allow / Always allow / Deny
+# (ACP session/request_permission). "Always allow" saves the command's prefix
+# ("git status", "cargo test", "ls") for the project in
+# <state_dir>/allowed-commands.json; delete an entry there to revoke it.
+# LLM_CONFIRM_BASH=0 in the agent's env runs commands without asking.
+[permissions]
+confirm_bash = true
 
 # Gradle runs from the project root; acp-bridge detects Android from gradlew +
 # AndroidManifest.xml / com.android. Defaults otherwise (3 builds, 300 s).

@@ -23,10 +23,10 @@
 +    send_session_update(session_id, notice_update(severity, title));
 +}
 +
- /// Display content attached to a tool call (ACP `ToolCallContent`).
- #[derive(Debug, Clone, PartialEq, Eq)]
- pub enum ToolCallContent {
-@@ -867,6 +886,15 @@ mod tests {
+ /// Params of `session/request_permission` for the model's shell command.
+ ///
+ /// v1 carries the tool call (`toolCall`, a `ToolCallUpdate`: the title is
+@@ -927,6 +946,15 @@ mod tests {
          assert!(payload.get("messageId").is_none());
      }
  
@@ -44,7 +44,7 @@
          let payload = thought_update(ProtocolVersion::V2, "why", "m-1-thought-1");
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -302,8 +302,17 @@ mod tests {
+@@ -322,8 +322,17 @@ mod tests {
      use super::{ConfigFile, LlmSection};
      use crate::verify::VerifyMode;
  
@@ -62,7 +62,7 @@
          std::env::remove_var("LLM_SYSTEM_PROMPT");
  
          let cfg = ConfigFile {
-@@ -320,6 +329,7 @@ mod tests {
+@@ -340,6 +349,7 @@ mod tests {
  
      #[test]
      fn verify_table_is_read_and_env_overrides_it() {
@@ -70,7 +70,7 @@
          for k in ["LLM_VERIFY", "LLM_VERIFY_MAX_ATTEMPTS", "LLM_VERIFY_TIMEOUT_SECS"] {
              std::env::remove_var(k);
          }
-@@ -363,6 +373,7 @@ mod tests {
+@@ -384,6 +394,7 @@ mod tests {
  
      #[test]
      fn investigate_limit_from_file_and_env() {
@@ -78,7 +78,15 @@
          std::env::remove_var("LLM_INVESTIGATE_LIMIT");
          let cfg: ConfigFile = toml::from_str("[guards]\ninvestigate_limit = 9\n").unwrap();
          assert_eq!(cfg.into_llm_config().agent.investigate_limit, 9);
-@@ -376,6 +387,7 @@ mod tests {
+@@ -397,6 +408,7 @@ mod tests {
+ 
+     #[test]
+     fn confirm_bash_from_file_and_env() {
++        let _env = env_lock();
+         std::env::remove_var("LLM_CONFIRM_BASH");
+         let cfg: ConfigFile = toml::from_str("").unwrap();
+         assert!(cfg.into_llm_config().agent.confirm_bash, "asks by default");
+@@ -410,6 +422,7 @@ mod tests {
  
      #[test]
      fn reserve_output_tokens_from_file_env_and_default() {
@@ -86,7 +94,7 @@
          std::env::remove_var("LLM_RESERVE_OUTPUT_TOKENS");
          std::env::remove_var("LLM_MAX_TOKENS");
          let cfg: ConfigFile = toml::from_str("[llm]\nmax_tokens = 8192\n").unwrap();
-@@ -413,6 +425,7 @@ mod tests {
+@@ -447,6 +460,7 @@ mod tests {
  
      #[test]
      fn repo_config_parses_as_is_and_as_proposed() {
@@ -94,7 +102,7 @@
          for k in ["LLM_RESERVE_OUTPUT_TOKENS", "LLM_INVESTIGATE_LIMIT", "LLM_MCP", "LLM_WEB_SEARCH", "LLM_NOTES", "LLM_LOOP_CHECK", "LLM_MAX_TOKENS", "LLM_SYSTEM_PROMPT", "LLM_PERSIST", "LLM_STATE_DIR", "LLM_SESSION_RETENTION_DAYS"] {
              std::env::remove_var(k);
          }
-@@ -461,6 +474,7 @@ mod tests {
+@@ -495,6 +509,7 @@ mod tests {
  
      #[test]
      fn llm_config_env_system_prompt_overrides_file() {
@@ -689,7 +697,7 @@
      ToolStart {
          /// ACP v1 `toolCallId` — required for clients to pair tool_call /
          /// tool_call_update updates. The LLM assigns this id per call; when
-@@ -369,6 +373,10 @@ pub struct AppState {
+@@ -382,6 +386,10 @@ pub struct AppState {
      /// emit helpers (`acp::notify_*`) branch on it so v1 Clients see
      /// v1 notifications and v2 Clients see v2.
      pub protocol_version: crate::protocol::ProtocolVersion,
@@ -700,7 +708,7 @@
      /// The local web-search server (`[[mcp.servers]]` role `web_search`),
      /// shared by all sessions.
      pub web: Option<Arc<crate::websearch::WebSearch>>,
-@@ -389,6 +397,7 @@ impl Clone for AppState {
+@@ -407,6 +415,7 @@ impl Clone for AppState {
              sessions: Arc::clone(&self.sessions),
              config: self.config.clone(),
              protocol_version: self.protocol_version,
@@ -708,7 +716,7 @@
              web: self.web.clone(),
              store: self.store.clone(),
              mcp_specs: Arc::clone(&self.mcp_specs),
-@@ -411,6 +420,7 @@ impl AppState {
+@@ -436,6 +445,7 @@ impl AppState {
              // `initialize`. We pick V1 here so unit tests that build an
              // AppState directly get v1 wire format without ceremony.
              protocol_version: crate::protocol::ProtocolVersion::V1,
@@ -716,7 +724,7 @@
          })
      }
  
-@@ -1724,7 +1734,7 @@ async fn passthrough_call(turn: &TurnCtx, name: &str, args: &Value, cancel: &Can
+@@ -1754,7 +1764,7 @@ async fn passthrough_call(turn: &TurnCtx, name: &str, args: &Value, cancel: &Can
  
  /// Note at the end of a request when old rounds were dropped and the
  /// notes are off.
@@ -725,16 +733,25 @@
  
  /// A `notes` tool call against the session's notes (at most
  /// `notes::PER_TURN_LIMIT` per turn).
-@@ -1830,7 +1840,7 @@ async fn run_tool_call(
+@@ -1929,7 +1939,7 @@ async fn run_tool_call(
      });
  
      let mut raw_override: Option<Value> = None;
--    let (outcome, note, guarded) = match turn.guard.before(name, args) {
-+    let (outcome, mut note, guarded) = match turn.guard.before_call(tool_call_id, name, args) {
+-    let decision = match turn.guard.before(name, args) {
++    let decision = match turn.guard.before_call(tool_call_id, name, args) {
+         guards::Decision::Run if name == "bash" && state.config.agent.confirm_bash => {
+             match approve_command(state, working_dir, tool_call_id, args, turn, notify, cancel).await {
+                 Ok(()) => guards::Decision::Run,
+@@ -1938,7 +1948,7 @@ async fn run_tool_call(
+         }
+         d => d,
+     };
+-    let (outcome, note, guarded) = match decision {
++    let (outcome, mut note, guarded) = match decision {
          guards::Decision::Answer { text, failed } => {
              debug!(tool = name, failed, "Tool call answered by the guard");
              (tools::ToolOutcome { output: text, failed }, None, true)
-@@ -1853,7 +1863,7 @@ async fn run_tool_call(
+@@ -1961,7 +1971,7 @@ async fn run_tool_call(
                  n if turn.passthrough.contains_key(n) => passthrough_call(turn, n, args, cancel).await,
                  _ => tools::execute_tool_async(working_dir, name, args, cancel).await,
              };
@@ -743,7 +760,7 @@
              if !outcome.failed {
                  if let Some(diag) = xcode_diagnostics(turn, name, args, cancel).await {
                      note = Some(match note {
-@@ -1866,6 +1876,18 @@ async fn run_tool_call(
+@@ -1974,6 +1984,18 @@ async fn run_tool_call(
          }
      };
  
@@ -762,7 +779,7 @@
      let mut content = if guarded {
          vec![crate::acp::ToolCallContent::plain(&outcome.output, MAX_TOOL_OUTPUT_CHARS)]
      } else {
-@@ -1994,6 +2016,9 @@ pub async fn session_prompt_with_cancel(
+@@ -2103,6 +2125,9 @@ pub async fn session_prompt_with_cancel(
      let mut empty_retries = 0usize;
      let mut loop_retried = false;
      let mut thinking_off_next = false;
@@ -772,7 +789,7 @@
      let mut final_text = String::new();
      let mut last_error_class: Option<crate::llm::LlmErrorKind> = None;
      let mut vs = VerifyState::default();
-@@ -2074,14 +2099,14 @@ pub async fn session_prompt_with_cancel(
+@@ -2184,14 +2209,14 @@ pub async fn session_prompt_with_cancel(
              crate::xcode::ConnState::Failed(why) => {
                  if conn.report_change("failed") {
                      warn!(reason = %why, "Xcode tools unavailable for this session");
@@ -790,7 +807,7 @@
                      ));
                  }
              }
-@@ -2101,13 +2126,37 @@ pub async fn session_prompt_with_cancel(
+@@ -2211,13 +2236,37 @@ pub async fn session_prompt_with_cancel(
      let tool_defs_chars = Value::Array(tool_defs.clone()).to_string().len();
      let context_budget = context::budget_tokens(
          state.config.context_size,
@@ -830,7 +847,7 @@
          if cancel.is_cancelled() {
              cancelled = true;
              break;
-@@ -2130,26 +2179,32 @@ pub async fn session_prompt_with_cancel(
+@@ -2240,26 +2289,32 @@ pub async fn session_prompt_with_cancel(
          // Keep the request inside the context window (the stored history
          // is not changed). Room is kept for the notes block that is
          // appended to the last message below.
@@ -872,7 +889,7 @@
                  let bullet = crate::notes::summarize(
                      &history,
                      &fresh,
-@@ -2160,7 +2215,7 @@ pub async fn session_prompt_with_cancel(
+@@ -2270,7 +2325,7 @@ pub async fn session_prompt_with_cancel(
                      if let Some(b) = &bullet {
                          s.notes.add_auto(b);
                      }
@@ -881,7 +898,7 @@
                      notes_now = s.notes.clone();
                  }
                  info!(
-@@ -2178,30 +2233,59 @@ pub async fn session_prompt_with_cancel(
+@@ -2288,30 +2343,59 @@ pub async fn session_prompt_with_cancel(
          if let Some(block) = &tail_block {
              crate::notes::append_to_last(&mut messages, block);
          }
@@ -943,7 +960,7 @@
              r = llm::chat_with_options(&state.config, &messages, None, Some(&tool_defs), options) => r,
              _ = cancel.cancelled() => {
                  info!(session_id, "Turn cancelled during the LLM request");
-@@ -2209,6 +2293,8 @@ pub async fn session_prompt_with_cancel(
+@@ -2319,6 +2403,8 @@ pub async fn session_prompt_with_cancel(
                  break;
              }
          };
@@ -952,7 +969,7 @@
  
          match chat_result {
              Ok(response) => {
-@@ -2242,8 +2328,8 @@ pub async fn session_prompt_with_cancel(
+@@ -2352,8 +2438,8 @@ pub async fn session_prompt_with_cancel(
                          }
                          loop_retried = true;
                          warn!(why = %why, reasoning_chars = reasoning.as_deref().map_or(0, str::len), "Reasoning loop; discarding the reply and retrying with thinking off");
@@ -963,7 +980,7 @@
                          ));
                          let nudge = if why == "length" {
                              format!("{LOOP_NUDGE}{LENGTH_NUDGE}")
-@@ -2280,17 +2366,6 @@ pub async fn session_prompt_with_cancel(
+@@ -2390,17 +2476,6 @@ pub async fn session_prompt_with_cancel(
                              "Recovered tool calls embedded in content (thinking-mode workaround)"
                          );
                          tool_calls = recovered;
@@ -981,7 +998,7 @@
                      } else if clean_text.trim().is_empty()
                          && empty_retries < MAX_EMPTY_RETRIES
                          && round + 1 < max_rounds
-@@ -2309,7 +2384,10 @@ pub async fn session_prompt_with_cancel(
+@@ -2419,7 +2494,10 @@ pub async fn session_prompt_with_cancel(
                          continue;
                      } else {
                          // Final answer for this round.
@@ -993,7 +1010,7 @@
                          if !text.is_empty() {
                              let mut sessions = state.sessions_write();
                              if let Some(session) = sessions.get_mut(session_id) {
-@@ -2343,7 +2421,8 @@ pub async fn session_prompt_with_cancel(
+@@ -2453,7 +2531,8 @@ pub async fn session_prompt_with_cancel(
                              VerifyStep::Skip => text,
                              VerifyStep::Finish(text) => text,
                          };
@@ -1003,7 +1020,7 @@
                          if !text.is_empty() {
                              final_text = text.clone();
                              notify(Notification::TextChunk(text));
-@@ -2427,6 +2506,14 @@ pub async fn session_prompt_with_cancel(
+@@ -2541,6 +2620,14 @@ pub async fn session_prompt_with_cancel(
                      break;
                  }
                  round += 1;
@@ -1018,7 +1035,7 @@
                  if let Some(text) = turn.end_turn.take() {
                      info!("Ending the turn: {text}");
                      push_message(state, session_id, json!({"role": "assistant", "content": &text}));
-@@ -2541,6 +2628,16 @@ pub async fn session_prompt_with_cancel(
+@@ -2655,6 +2742,16 @@ pub async fn session_prompt_with_cancel(
          "completed"
      };
  
@@ -1770,7 +1787,7 @@
      #[test]
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -469,6 +469,12 @@ async fn run_acp_loop(mut state: Arc<AppState>) -> bool {
+@@ -484,6 +484,12 @@ async fn run_acp_loop(mut state: Arc<AppState>) -> bool {
                                  // run_acp_loop the Arc has refcount 1, so
                                  // make_mut never actually clones.
                                  Arc::make_mut(&mut state).protocol_version = negotiated;
@@ -1783,7 +1800,7 @@
                                  let result = engine::initialize(&state.config, negotiated);
                                  acp::send_response(&id, result);
                              }
-@@ -855,8 +861,33 @@ async fn handle_acp_prompt(
+@@ -870,8 +876,33 @@ async fn handle_acp_prompt(
      // the engine ends without finishing them).
      let mut open_tool_calls: Vec<String> = Vec::new();
      while let Some(notif) = notify_rx.recv().await {
@@ -2127,7 +2144,7 @@
          let wd = tmpwd();
 --- a/tests/integration_test.rs
 +++ b/tests/integration_test.rs
-@@ -1589,7 +1589,7 @@ async fn test_file_tool_calls_carry_diff_locations_and_raw_input() {
+@@ -1591,7 +1591,7 @@ async fn test_file_tool_calls_carry_diff_locations_and_raw_input() {
      let file = format!("{cwd}/src/new.txt");
      let mut h = TestHarness::start_with_router_and_env(
          port,
@@ -2136,7 +2153,7 @@
          &[("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1"))],
      )
      .await;
-@@ -1627,6 +1627,7 @@ async fn test_file_tool_calls_carry_diff_locations_and_raw_input() {
+@@ -1629,6 +1629,7 @@ async fn test_file_tool_calls_carry_diff_locations_and_raw_input() {
              "Create the file first.",
              "Now extend it.",
              "Try a stale edit.",
@@ -2144,7 +2161,7 @@
              "Check the result.",
              "Run the checks.",
              "All good."
-@@ -1739,7 +1740,7 @@ async fn test_v2_tool_calls_use_upserts_and_v2_diff_shape() {
+@@ -1741,7 +1742,7 @@ async fn test_v2_tool_calls_use_upserts_and_v2_diff_shape() {
      let file = format!("{cwd}/src/new.txt");
      let mut h = TestHarness::start_with_router_and_env(
          port,
@@ -2153,7 +2170,7 @@
          &[("LLM_BASE_URL", &format!("http://127.0.0.1:{port}/v1"))],
      )
      .await;
-@@ -1758,9 +1759,9 @@ async fn test_v2_tool_calls_use_upserts_and_v2_diff_shape() {
+@@ -1760,9 +1761,9 @@ async fn test_v2_tool_calls_use_upserts_and_v2_diff_shape() {
  
      assert!(updates_of(&notifications, "tool_call").is_empty());
      let thoughts = updates_of(&notifications, "agent_thought_chunk");
@@ -2165,7 +2182,7 @@
  
      let updates = updates_of(&notifications, "tool_call_update");
      assert_eq!(updates.len(), 10, "start + completion per call");
-@@ -2494,3 +2495,250 @@ async fn test_bash_timeout_fails_the_call_and_the_turn_continues() {
+@@ -2496,3 +2497,250 @@ async fn test_bash_timeout_fails_the_call_and_the_turn_continues() {
      h.shutdown();
      let _ = std::fs::remove_dir_all(&project);
  }
@@ -2418,7 +2435,7 @@
 +}
 --- a/tests/tooling_test.rs
 +++ b/tests/tooling_test.rs
-@@ -434,9 +434,10 @@ async fn step1_llm_timeout_is_not_retried() {
+@@ -436,9 +436,10 @@ async fn step1_llm_timeout_is_not_retried() {
      let _ = std::fs::remove_dir_all(&dir);
  }
  
@@ -2432,7 +2449,7 @@
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn step1_context_budget_uses_the_output_reservation() {
      let dir = fresh_dir("reserve");
-@@ -455,7 +456,7 @@ async fn step1_context_budget_uses_the_output_reservation() {
+@@ -457,7 +458,7 @@ async fn step1_context_budget_uses_the_output_reservation() {
          script(writes),
          &[
              ("LLM_MODEL_CONTEXT", "12000"),
@@ -2441,7 +2458,7 @@
              ("LLM_RESERVE_OUTPUT_TOKENS", "2000"),
          ],
      )
-@@ -787,7 +788,7 @@ async fn step4_loop_is_discarded_and_retried_with_thinking_off() {
+@@ -789,7 +790,7 @@ async fn step4_loop_is_discarded_and_retried_with_thinking_off() {
          .iter()
          .map(|u| u["content"]["text"].as_str().unwrap().to_string())
          .collect();
@@ -2450,7 +2467,7 @@
      assert!(!thoughts.iter().any(|t| t.contains("scene property is read-only")), "{thoughts:?}");
      // The next turn starts with thinking on again.
      let (_, r) = b.prompt(&sid, "thanks");
-@@ -964,7 +965,7 @@ async fn step6_dropped_rounds_are_summarized_once() {
+@@ -966,7 +967,7 @@ async fn step6_dropped_rounds_are_summarized_once() {
      replies.push(answer("read them all"));
      let (mut b, recorded) = Bridge::start(
          script(replies),
@@ -2459,7 +2476,7 @@
      )
      .await;
      b.initialize(1);
-@@ -1388,7 +1389,10 @@ async fn step8b_swift_edits_get_xcode_diagnostics() {
+@@ -1390,7 +1391,10 @@ async fn step8b_swift_edits_get_xcode_diagnostics() {
      );
      assert!(results[1].ends_with("[Xcode diagnostics: no errors]"), "{}", results[1]);
      assert!(!results[2].contains("Xcode diagnostics"), "{}", results[2]);
@@ -2471,7 +2488,7 @@
      // The client keeps the diff first and shows the note after it.
      let done = updates(&notes, "tool_call_update");
      assert_eq!(done[0]["status"], "completed");
-@@ -1426,7 +1430,7 @@ async fn step8b_swift_edits_get_xcode_diagnostics() {
+@@ -1428,7 +1432,7 @@ async fn step8b_swift_edits_get_xcode_diagnostics() {
      assert_eq!(r["result"]["stopReason"], "end_turn", "{r}");
      assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
      let results = tool_results(recorded.lock().unwrap().last().unwrap());

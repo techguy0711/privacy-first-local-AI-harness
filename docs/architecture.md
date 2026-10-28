@@ -70,10 +70,10 @@ Differences from local mode: `MODE=server` selects `Modelfile.server`; the gatew
 | Inference gateway | `services/gateway.py` + `services/config.py`, run by Open WebUI's venv Python (FastAPI, httpx, uvicorn come from there) | `stack.sh` `start_inference` | 127.0.0.1 and ::1, `GATEWAY_PORT` (8787) | in memory only | `logs/gateway.log`, `logs/gateway-audit.log` |
 | Open WebUI | `open-webui==$OPEN_WEBUI_VERSION` in `.venv/openwebui`, installed by uv without rapidocr | `stack.sh` `start_openwebui` (all its env flags are set there) | 127.0.0.1, `WEBUI_PORT` (3000) | `data/openwebui/` (webui.db, cache, audit.log) | `logs/openwebui.log` |
 | Brave MCP server | `build/brave-mcp/`, `npm ci` from `services/brave-mcp/package-lock.json` | `stack.sh` `start_brave`, only with `BRAVE_API_KEY`; `env -i` with just its key, cwd `build/brave-mcp` | 127.0.0.1, `BRAVE_MCP_PORT` (8765) | none | `logs/brave-mcp.log` |
-| acp-bridge | `bin/acp-bridge`, built from the pinned tag + `editors/acp/acp-bridge.patch` + `queue.patch` | the IDE, over stdio | nothing (stdio) | `data/acp-bridge/`, `-android/`, `-vscode/` (30-day retention) | stderr, kept by the IDE |
+| acp-bridge | `bin/acp-bridge`, built from the pinned tag + `editors/acp/acp-bridge.patch` + `queue.patch` | the IDE, over stdio | nothing (stdio) | `data/acp-bridge/`, `-android/`, `-vscode/` (sessions, 30-day retention; `allowed-commands.json`) | stderr, kept by the IDE |
 | Voice cleanup | `services/voice_cleanup.py` | stored in Open WebUI's DB by `stack.sh`; runs inside Open WebUI as an event function | n/a | n/a | `logs/openwebui.log` |
 
-The agent in each IDE is the same binary with a different config: `editors/acp/config.toml` (Xcode), `config.android.toml`, `config.vscode.toml`. Endpoint, model and key come from env vars entered in the IDE (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_MODEL_CONTEXT`, `LLM_QUEUE`, `LLM_TIMEOUT`, `LLM_API_KEY` in server mode), which `setup.sh --editors` prints; the TOML files are identical in both modes. `acp-bridge.patch` adds the build-and-fix loop, Xcode tools, the guarded Brave `web_search`, history trimming, loop guards, saved sessions and images; `queue.patch` adds the gateway's jobs transport (idempotency key, polling, `DELETE` to cancel). Details: docs/editors.md.
+The agent in each IDE is the same binary with a different config: `editors/acp/config.toml` (Xcode), `config.android.toml`, `config.vscode.toml`. Endpoint, model and key come from env vars entered in the IDE (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_MODEL_CONTEXT`, `LLM_QUEUE`, `LLM_TIMEOUT`, `LLM_API_KEY` in server mode), which `setup.sh --editors` prints; the TOML files are identical in both modes. `acp-bridge.patch` adds the build-and-fix loop, Xcode tools, the guarded Brave `web_search`, history trimming, loop guards, saved sessions, images, and asking before each `bash` command (ACP `session/request_permission`: Allow / Always allow a saved prefix / Deny); `queue.patch` adds the gateway's jobs transport (idempotency key, polling, `DELETE` to cancel). Details: docs/editors.md.
 
 ## How configuration flows
 
@@ -168,7 +168,7 @@ Rules 6 to 8 are about how work is done here, not code.
 | `services/brave-mcp/package*.json` | Brave MCP server pin | `setup.sh` (`npm ci`), `doctor.sh` |
 | `scripts/runtime.sh` | sourced after `.env`: config.py exports, version pins, Whisper pin | all three scripts |
 | `scripts/sbom.py` | CycloneDX SBOM of what is installed | `setup.sh` step 9 |
-| `editors/acp/*.toml` | acp-bridge config per IDE (prompt, guards, MCP policy, Brave URL, persistence) | acp-bridge at runtime; `doctor.sh` loads each |
+| `editors/acp/*.toml` | acp-bridge config per IDE (prompt, guards, MCP policy, Brave URL, persistence, `[permissions]`) | acp-bridge at runtime; `doctor.sh` loads each |
 | `editors/acp/*.patch` | our changes to upstream acp-bridge, applied in order on the pinned tag | `setup.sh --editors` (`git apply`); no script regenerates them |
 | `tests/` | gateway, config and voice cleanup unit tests; simulated inference, no models | `.venv/openwebui/bin/python -m unittest discover -s tests` |
 | `server-test/` | `MODE=server` in Docker on a Mac: Dockerfile, compose, `boot.sh`, Caddyfile, 8B Modelfile | `docker compose` (docs/server.md) |

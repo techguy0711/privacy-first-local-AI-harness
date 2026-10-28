@@ -135,7 +135,7 @@ index 55185ba..a617ac0 100644
  bytes = "1"
  tracing = "0.1"
 diff --git a/README.md b/README.md
-index 1927c56..e47a8ff 100644
+index 1927c56..64046bf 100644
 --- a/README.md
 +++ b/README.md
 @@ -141,8 +141,22 @@ acp-bridge makes **zero outbound network calls** beyond the user-configured LLM
@@ -163,7 +163,7 @@ index 1927c56..e47a8ff 100644
  
  This makes acp-bridge safe to run on truly air-gapped networks: the binary will work identically with a local Ollama instance on a disconnected machine, and there is no failure path that depends on internet reachability.
  
-@@ -223,13 +237,29 @@ acp-bridge supports three configuration methods (highest priority wins):
+@@ -223,13 +237,30 @@ acp-bridge supports three configuration methods (highest priority wins):
  | `LLM_SYSTEM_PROMPT` | (auto-generated) | Custom system prompt |
  | `LLM_TEMPERATURE` | (model default) | Sampling temperature (0.0-2.0) |
  | `LLM_MAX_TOKENS` | (model default) | Maximum tokens to generate |
@@ -180,6 +180,7 @@ index 1927c56..e47a8ff 100644
 +| `LLM_WEB_ALLOWLIST` | (empty) | Comma-separated host suffixes the `web_fetch` tool is allowed to reach. Empty = block all web access, and `web_fetch` is not offered to the model at all. |
 +| `LLM_MAX_TOOL_ROUNDS` | `30` | Maximum LLM rounds (tool-call rounds) per turn; a failed verify build starts a fresh budget. |
 +| `LLM_BASH_TIMEOUT_SECS` | `120` | Time limit for one `bash` tool call. On timeout the command's whole process group is killed and the output so far is returned as a failed call. |
++| `LLM_CONFIRM_BASH` | `on` | [Ask before shell commands](#asking-before-shell-commands): Allow / Always allow / Deny for each `bash` command no saved prefix covers. `0` / `off` runs them without asking. |
 +| `LLM_VERIFY` | `auto` | [Build-and-fix loop](#build-and-fix-loop): `auto` (detect the build from the session cwd), `off`, or a shell command run with `bash -c` in the cwd. |
 +| `LLM_VERIFY_MAX_ATTEMPTS` | `3` | Verify builds per turn before giving up and reporting the remaining errors. |
 +| `LLM_VERIFY_TIMEOUT_SECS` | `300` | Time limit for one verify build (process group killed on timeout). |
@@ -196,7 +197,7 @@ index 1927c56..e47a8ff 100644
  | `RUST_LOG` | `acp_bridge=info` | Log level (`debug`, `info`, `warn`, `error`) |
  
  Also supports `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_API_KEY` as aliases.
-@@ -242,7 +272,261 @@ cp config.toml.example config.toml
+@@ -242,7 +273,308 @@ cp config.toml.example config.toml
  ./acp-bridge config.toml
  ```
  
@@ -216,6 +217,7 @@ index 1927c56..e47a8ff 100644
 +| `[guards] loop_check` | `true` | `LLM_LOOP_CHECK` | [Reasoning-loop check](#reasoning-loop-check) |
 +| `[guards] max_reasoning_chars` | `12000` | `LLM_MAX_REASONING_CHARS` | Longer reasoning (no tool call) counts as a loop |
 +| `[notes] enabled` | `true` | `LLM_NOTES` | [Working memory](#working-memory-notes) |
++| `[permissions] confirm_bash` | `true` | `LLM_CONFIRM_BASH` | [Ask before shell commands](#asking-before-shell-commands) |
 +| `[mcp] enabled` | `true` | `LLM_MCP` | `false` / `off` turns every MCP feature off |
 +| `[mcp] client_servers` | `"allowlist"` | – | Start the editor's stdio servers whose command is allowlisted, or `"off"` |
 +| `[mcp] allowed_commands` | Xcode / Xcode-beta `mcpbridge` | – | Canonical paths of client servers that may run |
@@ -357,6 +359,52 @@ index 1927c56..e47a8ff 100644
 +a turn, the model's notes are part of the summary. With `LLM_NOTES=0` there
 +is no tool and no block; a dropped-rounds note is still added at the end.
 +
++### Asking before shell commands
++
++Before the model's `bash` tool runs a command, acp-bridge asks the user
++through the client (ACP `session/request_permission`) with three options,
++as Claude Code does in the IDEs:
++
++- **Allow**: run it this once.
++- **Always allow "git status …" in this project**: run it, and from now
++  on run without asking any command in this project whose simple commands
++  all start with a saved prefix. For `cd app && cargo test` the option
++  saves `cd` and `cargo test`.
++- **Deny**: don't run it. The turn ends with "The command was denied; how
++  should I proceed?", and the model sees "Not run: the user denied this
++  command." in its history.
++
++A prefix is the program (`ls`, `grep`, `./scripts/check.sh`), plus the
++subcommand for tools such as `git`, `cargo`, `npm`, `swift`, `go` and
++`./gradlew` (`git status`, never all of `git`), plus the script for
++`npm run build` and `python3 -m pytest` / `python3 tool.py`. Commands
++split at `;`, `&&`, `||`, `|`, `&` and line breaks; quotes are honoured.
++No prefix covers, and "Always allow" is not offered for, a command with
++`$(…)`, backticks, `<(…)`, a subshell, a heredoc, output redirected to a
++file (`2>&1` and `>/dev/null` are fine), a variable or assignment as the
++program, or one that starts with a shell, a wrapper that runs another
++command (`env`, `sudo`, `xargs`, `timeout`, …) or a builtin that changes the
++shell (`export`, `source`, `alias`, …). A prefix allows every argument after
++it: "Always allow `find …`" also allows `find . -delete`.
++
++Prefixes are saved per project directory in
++`<state_dir>/allowed-commands.json` (0600; `{"projects": {"<cwd>":
++["cargo test", …]}}`), read again before every command, so a hand edit
++(deleting a line revokes it) applies at once and other acp-bridge processes
++see new ones. Without persistence they last until the process exits.
++
++The tool call row shows the command while the client asks; the prompt's
++title is the whole command on one line (line breaks shown as ` ⏎ `,
++2,000 characters at most). Stop (`session/cancel`) while it is open ends
++the turn without running it. A client that answers `cancelled` outside a
++cancel (a dismissed prompt), picks no allow option, or answers with an
++error is treated as Deny, and the turn ends; the error case says how to
++turn the prompt off. On ACP v2 the request carries `title` and a
++`command` subject (`command`, `cwd`, `toolCallId`) instead of `toolCall`.
++The bridge's own builds ([build-and-fix loop](#build-and-fix-loop)) and
++the `git_*` tools don't ask. `LLM_CONFIRM_BASH=0` (or `[permissions]
++confirm_bash = false`) turns the prompt off.
++
 +### Session persistence and `session/resume`
 +
 +With a state directory (`[persist] state_dir`, or `LLM_STATE_DIR`) each
@@ -459,14 +507,14 @@ index 1927c56..e47a8ff 100644
  
  ## Mac quick start (Apple Silicon)
  
-@@ -348,13 +632,35 @@ When the LLM supports function calling (Ollama with compatible models, OpenAI-co
+@@ -348,13 +680,35 @@ When the LLM supports function calling (Ollama with compatible models, OpenAI-co
  | `search_code` | Grep for patterns | Max 50 matches |
  | `write_file` | Create or overwrite a file | Max 5MB, sandboxed to working dir |
  | `edit` | Replace a unique substring in a file | Refuses ambiguous / missing matches |
 -| `web_fetch` | Fetch a URL over HTTP/HTTPS | 5MB body, 30s timeout. Requires `LLM_WEB_ALLOWLIST` |
 -| `bash` | Run a bash command in the working dir | Output truncated at 50 KB |
 +| `web_fetch` | Fetch a URL over HTTP/HTTPS | 5MB body, 30s timeout. Requires `LLM_WEB_ALLOWLIST`; not offered to the model without it |
-+| `bash` | Run a bash command in the working dir | Output truncated at 50 KB; killed (whole process group) after `LLM_BASH_TIMEOUT_SECS` (default 120 s) or on `session/cancel` |
++| `bash` | Run a bash command in the working dir | Asks first ([Asking before shell commands](#asking-before-shell-commands)); output truncated at 50 KB; killed (whole process group) after `LLM_BASH_TIMEOUT_SECS` (default 120 s) or on `session/cancel` |
  | `git_status` | Compact `git status` | — |
  | `git_diff` | Show unstaged (or staged) changes | Optional `path` filter |
  | `git_log` | One-line-per-commit log | `max_count` (default 20, max 200) |
@@ -497,7 +545,7 @@ index 1927c56..e47a8ff 100644
  All tools are **sandboxed** to the session's working directory — the LLM cannot access files outside it.
  
  ## ACP protocol support
-@@ -368,13 +674,13 @@ the matching wire shape from the same code base.
+@@ -368,13 +722,13 @@ the matching wire shape from the same code base.
  | Method | Status |
  |--------|--------|
  | `initialize` | Supported. v1: emits `agentCapabilities` + `agentInfo`. v2: emits unified `capabilities` + `info`. Image capability opt-in via `LLM_SUPPORTS_IMAGE`. |
@@ -517,7 +565,7 @@ index 1927c56..e47a8ff 100644
  | `session/delete` (v2 optional) | Graceful `-32601 not_implemented` rejection. Use `session/close` instead. |
  | `session/set_mode` | Graceful `-32602 no_modes` rejection. `session/new` does not return a `modes` array. |
  
-@@ -383,17 +689,183 @@ the matching wire shape from the same code base.
+@@ -383,17 +737,183 @@ the matching wire shape from the same code base.
  | Notification | Discriminator | Status |
  |--------------|---------------|--------|
  | Streaming text chunk | `agent_message_chunk` (v1 + v2) | Always emitted while the model is generating |
@@ -706,7 +754,7 @@ index 1927c56..e47a8ff 100644
  ### Structured backend errors
  
  `acp-bridge` returns an `error.data.category` + `error.data.retryable`
-@@ -427,7 +899,8 @@ When spawned by openab, logs go to the child process's stderr. To capture them,
+@@ -427,7 +947,8 @@ When spawned by openab, logs go to the child process's stderr. To capture them,
  ## Reliability
  
  - **Retry with exponential backoff** — transient errors (408, 429, 500, 502, 503, 504) and connection timeouts are retried up to 3 times with exponential backoff (500ms, 1s, 2s)
@@ -716,7 +764,7 @@ index 1927c56..e47a8ff 100644
  - **Memory-bounded sessions** — conversation history auto-trims to `LLM_MAX_HISTORY_TURNS` (default 50 turns), preventing OOM in long sessions
  - **Session limits** — configurable `LLM_MAX_SESSIONS` to cap concurrent sessions, and `LLM_SESSION_IDLE_TIMEOUT` to auto-evict idle sessions
  - **Stream buffer cap** — SSE stream buffer capped at 10MB to prevent unbounded memory growth from malicious or buggy backends
-@@ -444,7 +917,7 @@ When spawned by openab, logs go to the child process's stderr. To capture them,
+@@ -444,7 +965,7 @@ When spawned by openab, logs go to the child process's stderr. To capture them,
  ## Limitations
  
  - No authentication or authorization — intended to run behind a trusted harness (openab, Zed)
@@ -726,10 +774,10 @@ index 1927c56..e47a8ff 100644
  
  ## License
 diff --git a/config.toml.example b/config.toml.example
-index 962642e..4859d0c 100644
+index 962642e..030ba41 100644
 --- a/config.toml.example
 +++ b/config.toml.example
-@@ -28,6 +28,137 @@ timeout_secs = 300
+@@ -28,6 +28,146 @@ timeout_secs = 300
  # Prevents memory growth in long sessions
  max_history_turns = 50
  
@@ -863,6 +911,15 @@ index 962642e..4859d0c 100644
 +# LLM_SESSION_RETENTION_DAYS); 0 = delete it when the session is closed
 +# (one left behind by a crash goes a day later).
 +retention_days = 30
++
++# ---------------------------------------------------------------------------
++# Permissions — ask the user (Allow / Always allow / Deny) before each bash
++# command no saved "Always allow" prefix covers. Prefixes are saved per
++# project in <state_dir>/allowed-commands.json (memory only without one).
++# ---------------------------------------------------------------------------
++[permissions]
++# env LLM_CONFIRM_BASH overrides (0 = run commands without asking).
++confirm_bash = true
 +
  # ---------------------------------------------------------------------------
  # Client mode — spawn an external ACP agent (used with --client flag)
@@ -1408,10 +1465,10 @@ index 0000000..6b16438
 +    }
 +}
 diff --git a/src/acp.rs b/src/acp.rs
-index f0cd877..6dfa746 100644
+index f0cd877..c0da4ec 100644
 --- a/src/acp.rs
 +++ b/src/acp.rs
-@@ -77,19 +77,258 @@ pub fn notify_text(session_id: &str, text: &str) {
+@@ -77,19 +77,318 @@ pub fn notify_text(session_id: &str, text: &str) {
      );
  }
  
@@ -1445,6 +1502,66 @@ index f0cd877..6dfa746 100644
 +        return;
 +    }
 +    send_session_update(session_id, thought_update(version, text, message_id));
++}
++
++/// Params of `session/request_permission` for the model's shell command.
++///
++/// v1 carries the tool call (`toolCall`, a `ToolCallUpdate`: the title is
++/// set to the whole command on one line, because VS Code's ACP Client shows
++/// only the title, and `rawInput.command` holds it as sent). v2 replaced
++/// `toolCall` with a required prompt `title` and a `command` subject.
++pub fn permission_request_params(
++    version: ProtocolVersion,
++    session_id: &str,
++    tool_call_id: &str,
++    command: &str,
++    cwd: &str,
++    options: &[Value],
++) -> Value {
++    let title = crate::permissions::prompt_title(command);
++    match version {
++        ProtocolVersion::V2 => json!({
++            "sessionId": session_id,
++            "title": format!("Run: {title}"),
++            "subject": {
++                "type": "command",
++                "command": command,
++                "cwd": cwd,
++                "toolCallId": tool_call_id
++            },
++            "options": options
++        }),
++        _ => json!({
++            "sessionId": session_id,
++            "toolCall": {
++                "toolCallId": tool_call_id,
++                "title": title,
++                "kind": "execute",
++                "rawInput": {"command": command}
++            },
++            "options": options
++        }),
++    }
++}
++
++/// Send `session/request_permission` with JSON-RPC id `request_id`: a
++/// request, which the client answers with that id. See
++/// [`permission_request_params`].
++pub fn send_permission_request_for(
++    version: ProtocolVersion,
++    request_id: u64,
++    session_id: &str,
++    tool_call_id: &str,
++    command: &str,
++    cwd: &str,
++    options: &[Value],
++) {
++    send(&json!({
++        "jsonrpc": "2.0",
++        "id": request_id,
++        "method": "session/request_permission",
++        "params": permission_request_params(version, session_id, tool_call_id, command, cwd, options)
++    }));
 +}
 +
 +/// Display content attached to a tool call (ACP `ToolCallContent`).
@@ -1680,7 +1797,7 @@ index f0cd877..6dfa746 100644
      );
  }
  
-@@ -108,14 +347,31 @@ pub fn kind_for_tool(name: &str) -> &'static str {
+@@ -108,14 +407,31 @@ pub fn kind_for_tool(name: &str) -> &'static str {
          "write_file" | "edit" => "edit",
          // Shell / command execution
          "shell" | "exec" | "bash" => "execute",
@@ -1715,7 +1832,7 @@ index f0cd877..6dfa746 100644
          // Everything else (delete/move/think are not yet in the default
          // toolset but we list the enum values for completeness).
          _ => "other",
-@@ -330,27 +586,6 @@ fn notify_text_v2(session_id: &str, text: &str) {
+@@ -330,27 +646,6 @@ fn notify_text_v2(session_id: &str, text: &str) {
      );
  }
  
@@ -1743,7 +1860,7 @@ index f0cd877..6dfa746 100644
  /// Dispatch a tool-call start notification.
  ///
  /// ACP v2 removed the `tool_call` sessionUpdate entirely. v2 Clients
-@@ -624,12 +859,161 @@ mod tests {
+@@ -624,12 +919,161 @@ mod tests {
  
      #[test]
      fn thought_chunk_payload_includes_text_content() {
@@ -1924,7 +2041,7 @@ index 8ff374c..67a342d 100644
                  .timeout(std::time::Duration::from_secs(5))
                  .build()
 diff --git a/src/config.rs b/src/config.rs
-index 121ced4..eee9fb1 100644
+index 121ced4..126f6ab 100644
 --- a/src/config.rs
 +++ b/src/config.rs
 @@ -9,7 +9,6 @@ use std::path::Path;
@@ -1935,7 +2052,7 @@ index 121ced4..eee9fb1 100644
  use std::time::Duration;
  
  /// On-disk config file structure.
-@@ -17,6 +16,137 @@ use std::time::Duration;
+@@ -17,6 +16,157 @@ use std::time::Duration;
  pub struct ConfigFile {
      #[serde(default)]
      pub llm: LlmSection,
@@ -1958,6 +2075,18 @@ index 121ced4..eee9fb1 100644
 +    /// `[persist]` — session persistence.
 +    #[serde(default)]
 +    pub persist: crate::store::PersistSection,
++    /// `[permissions]` — asking before shell commands.
++    #[serde(default)]
++    pub permissions: PermissionsSection,
++}
++
++/// `[permissions]` table of the config file.
++#[derive(Debug, Deserialize, Default, Clone)]
++pub struct PermissionsSection {
++    /// Ask the user (ACP `session/request_permission`) before each `bash`
++    /// command no "Always allow" prefix covers (`LLM_CONFIRM_BASH`,
++    /// default true).
++    pub confirm_bash: Option<bool>,
 +}
 +
 +/// `[notes]` table of the config file.
@@ -2006,6 +2135,9 @@ index 121ced4..eee9fb1 100644
 +    /// Session persistence (`[persist]`, `LLM_PERSIST`, `LLM_STATE_DIR`,
 +    /// `LLM_SESSION_RETENTION_DAYS`).
 +    pub persist: crate::store::PersistSettings,
++    /// Ask before `bash` commands (`[permissions] confirm_bash`,
++    /// `LLM_CONFIRM_BASH`).
++    pub confirm_bash: bool,
 +}
 +
 +impl Default for AgentSettings {
@@ -2018,6 +2150,7 @@ index 121ced4..eee9fb1 100644
 +            notes: true,
 +            mcp: crate::mcp::McpSettings::default(),
 +            persist: crate::store::PersistSettings::default(),
++            confirm_bash: true,
 +        }
 +    }
 +}
@@ -2055,6 +2188,9 @@ index 121ced4..eee9fb1 100644
 +            .or(file.guards.max_reasoning_chars)
 +            .unwrap_or(crate::loopdetect::DEFAULT_MAX_REASONING_CHARS);
 +        let notes = env_bool("LLM_NOTES").or(file.notes.enabled).unwrap_or(true);
++        let confirm_bash = env_bool("LLM_CONFIRM_BASH")
++            .or(file.permissions.confirm_bash)
++            .unwrap_or(true);
 +        Self {
 +            reserve_output_tokens,
 +            investigate_limit,
@@ -2063,6 +2199,7 @@ index 121ced4..eee9fb1 100644
 +            notes,
 +            mcp: crate::mcp::McpSettings::resolve(&file.mcp),
 +            persist: crate::store::PersistSettings::resolve(&file.persist, file.config_dir.as_deref()),
++            confirm_bash,
 +        }
 +    }
 +
@@ -2073,7 +2210,7 @@ index 121ced4..eee9fb1 100644
  }
  
  #[derive(Debug, Deserialize, Default)]
-@@ -40,15 +170,24 @@ pub struct LlmSection {
+@@ -40,15 +190,24 @@ pub struct LlmSection {
      /// `usage_update` notifications.
      #[serde(default)]
      pub model_context: Option<u64>,
@@ -2100,7 +2237,7 @@ index 121ced4..eee9fb1 100644
                      cfg
                  }
                  Err(e) => {
-@@ -62,7 +201,9 @@ impl ConfigFile {
+@@ -62,7 +221,9 @@ impl ConfigFile {
  
      /// Merge config file values into LlmConfig. Env vars always take precedence.
      pub fn into_llm_config(self) -> LlmConfig {
@@ -2110,7 +2247,7 @@ index 121ced4..eee9fb1 100644
  
          // Helper: env var wins, then config file, then default
          let base_url = std::env::var("LLM_BASE_URL")
-@@ -134,11 +275,7 @@ impl ConfigFile {
+@@ -134,11 +295,7 @@ impl ConfigFile {
              .or(file.model_context)
              .unwrap_or(32768);
  
@@ -2123,7 +2260,7 @@ index 121ced4..eee9fb1 100644
  
          LlmConfig {
              base_url,
-@@ -153,6 +290,8 @@ impl ConfigFile {
+@@ -153,6 +310,8 @@ impl ConfigFile {
              session_idle_timeout_secs,
              prompt_supports_image,
              context_size,
@@ -2132,7 +2269,7 @@ index 121ced4..eee9fb1 100644
              client,
          }
      }
-@@ -161,6 +300,7 @@ impl ConfigFile {
+@@ -161,6 +320,7 @@ impl ConfigFile {
  #[cfg(test)]
  mod tests {
      use super::{ConfigFile, LlmSection};
@@ -2140,7 +2277,7 @@ index 121ced4..eee9fb1 100644
  
      #[test]
      fn llm_config_uses_system_prompt_from_file_when_env_missing() {
-@@ -171,12 +311,154 @@ mod tests {
+@@ -171,12 +331,168 @@ mod tests {
                  system_prompt: Some("from file".into()),
                  ..LlmSection::default()
              },
@@ -2192,6 +2329,7 @@ index 121ced4..eee9fb1 100644
 +        assert_eq!(cfg.persist.enabled, Some(true));
 +        assert_eq!(cfg.persist.retention_days, Some(30));
 +        assert!(cfg.persist.state_dir.is_none(), "the example writes nothing until a state_dir is set");
++        assert_eq!(cfg.permissions.confirm_bash, Some(true));
 +    }
 +
 +    #[test]
@@ -2205,6 +2343,19 @@ index 121ced4..eee9fb1 100644
 +        let cfg: ConfigFile = toml::from_str("[guards]\ninvestigate_limit = 9\n").unwrap();
 +        assert_eq!(cfg.into_llm_config().agent.investigate_limit, 0);
 +        std::env::remove_var("LLM_INVESTIGATE_LIMIT");
++    }
++
++    #[test]
++    fn confirm_bash_from_file_and_env() {
++        std::env::remove_var("LLM_CONFIRM_BASH");
++        let cfg: ConfigFile = toml::from_str("").unwrap();
++        assert!(cfg.into_llm_config().agent.confirm_bash, "asks by default");
++        let cfg: ConfigFile = toml::from_str("[permissions]\nconfirm_bash = false\n").unwrap();
++        assert!(!cfg.into_llm_config().agent.confirm_bash);
++        std::env::set_var("LLM_CONFIRM_BASH", "1");
++        let cfg: ConfigFile = toml::from_str("[permissions]\nconfirm_bash = false\n").unwrap();
++        assert!(cfg.into_llm_config().agent.confirm_bash, "env wins");
++        std::env::remove_var("LLM_CONFIRM_BASH");
 +    }
 +
 +    #[test]
@@ -2295,7 +2446,7 @@ index 121ced4..eee9fb1 100644
      #[test]
      fn llm_config_env_system_prompt_overrides_file() {
          std::env::set_var("LLM_SYSTEM_PROMPT", "from env");
-@@ -186,6 +468,7 @@ mod tests {
+@@ -186,6 +502,7 @@ mod tests {
                  system_prompt: Some("from file".into()),
                  ..LlmSection::default()
              },
@@ -2863,7 +3014,7 @@ index 0000000..1dcd838
 +    }
 +}
 diff --git a/src/engine.rs b/src/engine.rs
-index b11496f..8061fe6 100644
+index b11496f..1a34d2b 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
 @@ -4,20 +4,39 @@
@@ -2964,7 +3115,7 @@ index b11496f..8061fe6 100644
  /// Pull image content blocks out of a `session/prompt` `prompt` parameter
  /// across the same three shapes recognized by
  /// [`extract_user_text_from_prompt`]. MIME type is preserved per block.
-@@ -190,23 +257,101 @@ pub fn extract_user_images_from_prompt(prompt: &Value) -> Vec<ImageBlock> {
+@@ -190,21 +257,112 @@ pub fn extract_user_images_from_prompt(prompt: &Value) -> Vec<ImageBlock> {
  
  #[derive(Debug, Clone)]
  pub enum Notification {
@@ -3008,8 +3159,21 @@ index b11496f..8061fe6 100644
 +        content: Vec<crate::acp::ToolCallContent>,
      },
      TextChunk(String),
- }
- 
++    /// Ask the user whether the model's `bash` command may run: an ACP
++    /// `session/request_permission` request with JSON-RPC id `request_id`,
++    /// answered through [`AppState::client_requests`]. Sent after the
++    /// call's `ToolStart`.
++    Permission {
++        request_id: u64,
++        tool_call_id: String,
++        command: String,
++        /// Absolute working directory of the command.
++        cwd: String,
++        /// `PermissionOption`s, see [`crate::permissions::options`].
++        options: Vec<Value>,
++    },
++}
++
 +/// Maximum characters of tool output shown to the client per tool call.
 +const MAX_TOOL_OUTPUT_CHARS: usize = 4000;
 +
@@ -3065,12 +3229,10 @@ index b11496f..8061fe6 100644
 +        lang,
 +        MAX_TOOL_OUTPUT_CHARS,
 +    )]
-+}
-+
+ }
+ 
  // ---------------------------------------------------------------------------
- // AppState — shared state for all transports
- // ---------------------------------------------------------------------------
-@@ -224,6 +369,18 @@ pub struct AppState {
+@@ -224,6 +382,23 @@ pub struct AppState {
      /// emit helpers (`acp::notify_*`) branch on it so v1 Clients see
      /// v1 notifications and v2 Clients see v2.
      pub protocol_version: crate::protocol::ProtocolVersion,
@@ -3082,6 +3244,11 @@ index b11496f..8061fe6 100644
 +    /// The client's `mcpServers` per session (memory only), to reconnect
 +    /// a session restored after idle eviction.
 +    pub mcp_specs: Arc<std::sync::Mutex<HashMap<String, Value>>>,
++    /// Requests sent to the client that wait for its response (permission
++    /// to run a command); `main::run_acp_loop` hands responses to them.
++    pub client_requests: Arc<crate::permissions::ClientRequests>,
++    /// "Always allow" command prefixes per project.
++    pub command_rules: Arc<crate::permissions::CommandRules>,
 +}
 +
 +fn lock_mcp_specs(m: &std::sync::Mutex<HashMap<String, Value>>) -> std::sync::MutexGuard<'_, HashMap<String, Value>> {
@@ -3089,13 +3256,15 @@ index b11496f..8061fe6 100644
  }
  
  impl Clone for AppState {
-@@ -232,14 +389,22 @@ impl Clone for AppState {
+@@ -232,14 +407,29 @@ impl Clone for AppState {
              sessions: Arc::clone(&self.sessions),
              config: self.config.clone(),
              protocol_version: self.protocol_version,
 +            web: self.web.clone(),
 +            store: self.store.clone(),
 +            mcp_specs: Arc::clone(&self.mcp_specs),
++            client_requests: Arc::clone(&self.client_requests),
++            command_rules: Arc::clone(&self.command_rules),
          }
      }
  }
@@ -3104,15 +3273,20 @@ index b11496f..8061fe6 100644
      pub fn new(config: LlmConfig) -> Arc<Self> {
 +        let web = crate::websearch::WebSearch::from_settings(&config.agent.mcp);
 +        let store = crate::store::Store::open(&config.agent.persist).map(Arc::new);
++        // Saved next to the sessions when they are stored, else in memory.
++        let rules_dir = store.as_ref().and(config.agent.persist.state_dir.as_deref());
++        let command_rules = Arc::new(crate::permissions::CommandRules::new(rules_dir));
          Arc::new(Self {
              sessions: Arc::new(RwLock::new(HashMap::new())),
 +            web,
 +            store,
 +            mcp_specs: Arc::default(),
++            client_requests: Arc::default(),
++            command_rules,
              config,
              // Default to V1 for safety. `main::run_acp_loop` overwrites
              // this with whatever the Client negotiated during
-@@ -277,7 +442,21 @@ impl AppState {
+@@ -277,7 +467,21 @@ impl AppState {
          let timeout = Duration::from_secs(timeout_secs);
          let mut sessions = self.sessions_write();
          let before = sessions.len();
@@ -3135,7 +3309,7 @@ index b11496f..8061fe6 100644
          let evicted = before - sessions.len();
          if evicted > 0 {
              info!(evicted, remaining = sessions.len(), "Evicted idle sessions");
-@@ -285,12 +464,23 @@ impl AppState {
+@@ -285,12 +489,23 @@ impl AppState {
      }
  
      /// Clean up all sessions. Returns the number of sessions cleaned.
@@ -3159,7 +3333,7 @@ index b11496f..8061fe6 100644
  }
  
  // ---------------------------------------------------------------------------
-@@ -338,21 +528,31 @@ pub fn initialize(config: &LlmConfig, protocol_version: crate::protocol::Protoco
+@@ -338,21 +553,31 @@ pub fn initialize(config: &LlmConfig, protocol_version: crate::protocol::Protoco
          json!({})
      };
  
@@ -3205,7 +3379,7 @@ index b11496f..8061fe6 100644
          _ => {
              // v1 (default)
              let prompt_capabilities_v1 = if config.prompt_supports_image {
-@@ -368,15 +568,24 @@ pub fn initialize(config: &LlmConfig, protocol_version: crate::protocol::Protoco
+@@ -368,15 +593,24 @@ pub fn initialize(config: &LlmConfig, protocol_version: crate::protocol::Protoco
                      "embeddedContext": false
                  })
              };
@@ -3233,7 +3407,7 @@ index b11496f..8061fe6 100644
                  "authMethods": []
              })
          }
-@@ -403,25 +612,13 @@ pub fn session_new(
+@@ -403,119 +637,1416 @@ pub fn session_new(
          }
      }
  
@@ -3246,28 +3420,24 @@ index b11496f..8061fe6 100644
 +    let cwd = sanitize_cwd(cwd);
      let session_id = Uuid::new_v4().to_string();
  
--    let system_prompt = state.config.system_prompt.clone().unwrap_or_else(|| {
--        std::env::var("LLM_SYSTEM_PROMPT").unwrap_or_else(|_| {
--            format!("You are a helpful coding assistant. The user's working directory is: {cwd}")
--        })
--    });
--
--    let session = Session::new(
--        json!({"role": "system", "content": system_prompt}),
--        PathBuf::from(&cwd),
--        protocol_version,
--    );
 +    let session = Session::new(system_message(state, &cwd), PathBuf::from(&cwd), protocol_version);
 +    if let Some(store) = &state.store {
 +        store.create(&session_meta(state, &session_id, &session));
 +    }
-     state.sessions_write().insert(session_id.clone(), session);
- 
-     info!(session_id = %session_id, max_history = state.config.max_history_turns, "New session");
-@@ -436,6 +633,295 @@ pub fn session_new(
-     Ok(session_id)
- }
- 
++    state.sessions_write().insert(session_id.clone(), session);
++
++    info!(session_id = %session_id, max_history = state.config.max_history_turns, "New session");
++
++    // NOTE: We return `Ok(session_id)` from here BEFORE emitting the
++    // post-session-creation notifications below. Callers (e.g.
++    // `main::run_acp_loop`) send the JSON-RPC response immediately on
++    // receiving the session id, then emit the notifications. This ordering
++    // matches what other ACP agents do (OpenClaw, OpenCode) — the Client
++    // learns the new sessionId first, then receives the post-session
++    // notifications (commands, info update) bound to that id.
++    Ok(session_id)
++}
++
 +/// `cwd` with only path-safe characters.
 +fn sanitize_cwd(cwd: &str) -> String {
 +    cwd.chars()
@@ -3277,11 +3447,11 @@ index b11496f..8061fe6 100644
 +
 +/// The system message for a session in `cwd` (from the current config).
 +fn system_message(state: &AppState, cwd: &str) -> Value {
-+    let system_prompt = state.config.system_prompt.clone().unwrap_or_else(|| {
-+        std::env::var("LLM_SYSTEM_PROMPT").unwrap_or_else(|_| {
-+            format!("You are a helpful coding assistant. The user's working directory is: {cwd}")
-+        })
-+    });
+     let system_prompt = state.config.system_prompt.clone().unwrap_or_else(|| {
+         std::env::var("LLM_SYSTEM_PROMPT").unwrap_or_else(|_| {
+             format!("You are a helpful coding assistant. The user's working directory is: {cwd}")
+         })
+     });
 +    json!({"role": "system", "content": system_prompt})
 +}
 +
@@ -3327,7 +3497,10 @@ index b11496f..8061fe6 100644
 +        store.write_meta(&m);
 +    }
 +}
-+
+ 
+-    let session = Session::new(
+-        json!({"role": "system", "content": system_prompt}),
+-        PathBuf::from(&cwd),
 +/// Set a session's stored title (shown in session lists) from its first
 +/// prompt; later prompts keep it.
 +pub fn session_set_title(state: &AppState, session_id: &str, title: &str) {
@@ -3557,14 +3730,80 @@ index b11496f..8061fe6 100644
 +    }
 +}
 +
- /// Post-creation notifications to send after `session/new` returns.
- /// Exposed so `main::run_acp_loop` can emit them with the right wire
- /// framing after the response is on the wire. The `protocol_version`
-@@ -508,14 +994,950 @@ pub async fn session_prompt(
-     notify_tx: Option<mpsc::UnboundedSender<Notification>>,
-     message_id: &str,
- ) -> PromptResult {
--    let notify = |n: Notification| {
++/// Post-creation notifications to send after `session/new` returns.
++/// Exposed so `main::run_acp_loop` can emit them with the right wire
++/// framing after the response is on the wire. The `protocol_version`
++/// argument controls which wire shape (v1 vs v2) the dispatchers emit.
++pub fn session_new_post_create_notifications(
++    session_id: &str,
++    cwd: &str,
++    protocol_version: crate::protocol::ProtocolVersion,
++) {
++    // Advertise the slash commands this agent recognises. Clients use this
++    // to populate the "/…" shortcut menu. The list is intentionally small:
++    // commands are shortcuts, not advertised features. See `tools.rs` for
++    // the tool surface that backs the longer-tail capabilities.
++    crate::acp::notify_available_commands_for(
+         protocol_version,
++        session_id,
++        &[
++            crate::acp::AvailableCommand::new(
++                "read",
++                "Read a file (alias for read_file tool)",
++                Some::<&str>("path"),
++            ),
++            crate::acp::AvailableCommand::new(
++                "ls",
++                "List directory contents (alias for list_dir tool)",
++                Some::<&str>("path"),
++            ),
++            crate::acp::AvailableCommand::new(
++                "search",
++                "Search code (alias for search tool)",
++                Some::<&str>("pattern"),
++            ),
++            crate::acp::AvailableCommand::new(
++                "edit",
++                "Patch a file via write_file tool",
++                Some::<&str>("path"),
++            ),
++            crate::acp::AvailableCommand::new(
++                "shell",
++                "Run a shell command via the shell tool",
++                Some::<&str>("command"),
++            ),
++        ],
+     );
+-    state.sessions_write().insert(session_id.clone(), session);
+ 
+-    info!(session_id = %session_id, max_history = state.config.max_history_turns, "New session");
++    // Initial session_info_update — title defaults to the cwd basename so
++    // the Client has something to show in its session list before any
++    // prompt runs.
++    let title = std::path::Path::new(cwd)
++        .file_name()
++        .and_then(|n| n.to_str())
++        .unwrap_or(cwd);
++    crate::acp::notify_session_info_for(protocol_version, session_id, title, None);
++}
++
++/// Handle `session/prompt` — runs the LLM with tool loop.
++///
++/// Sends `Notification` events through `notify_tx` as they happen (for ACP streaming).
++/// Returns the final status ("completed" or "failed") and accumulated text.
++///
++/// `message_id` is the opaque identifier acp-bridge mints for this
++/// prompt. It is required on the v2 `PromptResponse` and used by v2
++/// Clients to correlate the response with `user_message` and
++/// `agent_message` session updates. v1 Clients ignore it.
++pub async fn session_prompt(
++    state: &Arc<AppState>,
++    session_id: &str,
++    user_text: &str,
++    user_images: &[ImageBlock],
++    notify_tx: Option<mpsc::UnboundedSender<Notification>>,
++    message_id: &str,
++) -> PromptResult {
 +    session_prompt_with_cancel(
 +        state,
 +        session_id,
@@ -4094,8 +4333,13 @@ index b11496f..8061fe6 100644
 +    docs_calls: usize,
 +    /// Exposed MCP tools: model-facing name -> MCP tool name.
 +    passthrough: HashMap<String, String>,
-+    /// End the turn after this round with this text (Xcode stopped a build).
++    /// End the turn after this round with this text (Xcode stopped a
++    /// build, the user denied a command); the round's remaining tool calls
++    /// are not run.
 +    end_turn: Option<String>,
++    /// A client receives this turn's notifications, so it can be asked
++    /// for permission to run a command.
++    can_ask: bool,
 +    /// The web-search server when it answers this turn.
 +    web: Option<Arc<crate::mcp::McpClient>>,
 +    /// `web_search` calls that went out this turn.
@@ -4351,12 +4595,96 @@ index b11496f..8061fe6 100644
 +    }
 +}
 +
++/// Final message of a turn in which the user denied a command.
++pub const COMMAND_DENIED: &str = "The command was denied; how should I proceed?";
+ 
+-    // NOTE: We return `Ok(session_id)` from here BEFORE emitting the
+-    // post-session-creation notifications below. Callers (e.g.
+-    // `main::run_acp_loop`) send the JSON-RPC response immediately on
+-    // receiving the session id, then emit the notifications. This ordering
+-    // matches what other ACP agents do (OpenClaw, OpenCode) — the Client
+-    // learns the new sessionId first, then receives the post-session
+-    // notifications (commands, info update) bound to that id.
+-    Ok(session_id)
++/// Ask the user before the model's `bash` command runs, unless the
++/// project's "Always allow" prefixes cover it (see [`crate::permissions`]).
++/// `Err` is the tool result when it must not run; unless the turn was
++/// cancelled, the turn then ends.
++async fn approve_command(
++    state: &AppState,
++    working_dir: &Path,
++    tool_call_id: &str,
++    args: &Value,
++    turn: &mut TurnCtx,
++    notify: &(dyn Fn(Notification) + Send + Sync),
++    cancel: &CancelToken,
++) -> Result<(), String> {
++    use crate::permissions::{self, Decision};
++    let command = args.get("command").and_then(Value::as_str).unwrap_or("");
++    let rules = state.command_rules.rules(working_dir);
++    if permissions::covered(&rules, command) {
++        debug!(command, "Command covered by an Always-allow prefix");
++        return Ok(());
++    }
++    let prefixes = permissions::new_prefixes(&rules, command);
++    let decision = if turn.can_ask {
++        let (request_id, reply) = state.client_requests.register();
++        notify(Notification::Permission {
++            request_id,
++            tool_call_id: tool_call_id.to_string(),
++            command: command.to_string(),
++            cwd: working_dir.to_string_lossy().into_owned(),
++            options: permissions::options(prefixes.as_deref()),
++        });
++        tokio::select! {
++            reply = reply => permissions::decision(reply.unwrap_or_else(|_| Err("no answer".into()))),
++            _ = cancel.cancelled() => {
++                state.client_requests.forget(request_id);
++                Decision::Cancelled
++            }
++        }
++    } else {
++        Decision::Failed("no client to ask".into())
++    };
++    info!(command, ?decision, "Permission to run a command");
++    match decision {
++        Decision::Allow => Ok(()),
++        Decision::AllowAlways => {
++            if let Some(prefixes) = &prefixes {
++                state.command_rules.add(working_dir, prefixes);
++            }
++            Ok(())
++        }
++        Decision::Cancelled if cancel.is_cancelled() => Err("Not run: the user cancelled the turn.".into()),
++        Decision::Failed(e) => {
++            warn!(error = %e, "Could not ask for permission to run a command; not running it");
++            turn.end_turn = Some(format!(
++                "I could not ask you for permission to run a command (the IDE answered: {e}), so it was not run. \
++                 To run commands without asking, set `confirm_bash = false` under `[permissions]` in the agent's config \
++                 or `LLM_CONFIRM_BASH=0` in its environment."
++            ));
++            Err(format!("Not run: the user could not be asked for permission ({e})."))
++        }
++        Decision::Deny | Decision::Cancelled => {
++            turn.end_turn = Some(COMMAND_DENIED.to_string());
++            Err("Not run: the user denied this command.".into())
++        }
++    }
+ }
+ 
+-/// Post-creation notifications to send after `session/new` returns.
+-/// Exposed so `main::run_acp_loop` can emit them with the right wire
+-/// framing after the response is on the wire. The `protocol_version`
+-/// argument controls which wire shape (v1 vs v2) the dispatchers emit.
+-pub fn session_new_post_create_notifications(
 +/// Run one tool call of the model: report it to the client (start and
 +/// done), consult the guard, execute it, and add its result to the history.
 +#[allow(clippy::too_many_arguments)]
 +async fn run_tool_call(
 +    state: &AppState,
-+    session_id: &str,
+     session_id: &str,
+-    cwd: &str,
+-    protocol_version: crate::protocol::ProtocolVersion,
 +    working_dir: &Path,
 +    backend: llm::Backend,
 +    tool_call_id: &str,
@@ -4366,7 +4694,42 @@ index b11496f..8061fe6 100644
 +    vs: &mut VerifyState,
 +    notify: &(dyn Fn(Notification) + Send + Sync),
 +    cancel: &CancelToken,
-+) {
+ ) {
+-    // Advertise the slash commands this agent recognises. Clients use this
+-    // to populate the "/…" shortcut menu. The list is intentionally small:
+-    // commands are shortcuts, not advertised features. See `tools.rs` for
+-    // the tool surface that backs the longer-tail capabilities.
+-    crate::acp::notify_available_commands_for(
+-        protocol_version,
+-        session_id,
+-        &[
+-            crate::acp::AvailableCommand::new(
+-                "read",
+-                "Read a file (alias for read_file tool)",
+-                Some::<&str>("path"),
+-            ),
+-            crate::acp::AvailableCommand::new(
+-                "ls",
+-                "List directory contents (alias for list_dir tool)",
+-                Some::<&str>("path"),
+-            ),
+-            crate::acp::AvailableCommand::new(
+-                "search",
+-                "Search code (alias for search tool)",
+-                Some::<&str>("pattern"),
+-            ),
+-            crate::acp::AvailableCommand::new(
+-                "edit",
+-                "Patch a file via write_file tool",
+-                Some::<&str>("path"),
+-            ),
+-            crate::acp::AvailableCommand::new(
+-                "shell",
+-                "Run a shell command via the shell tool",
+-                Some::<&str>("command"),
+-            ),
+-        ],
+-    );
 +    if name == "build" {
 +        return build_tool_call(
 +            state,
@@ -4399,9 +4762,26 @@ index b11496f..8061fe6 100644
 +            .collect(),
 +        content: start_content.clone(),
 +    });
-+
+ 
+-    // Initial session_info_update — title defaults to the cwd basename so
+-    // the Client has something to show in its session list before any
+-    // prompt runs.
+-    let title = std::path::Path::new(cwd)
+-        .file_name()
+-        .and_then(|n| n.to_str())
+-        .unwrap_or(cwd);
+-    crate::acp::notify_session_info_for(protocol_version, session_id, title, None);
 +    let mut raw_override: Option<Value> = None;
-+    let (outcome, note, guarded) = match turn.guard.before(name, args) {
++    let decision = match turn.guard.before(name, args) {
++        guards::Decision::Run if name == "bash" && state.config.agent.confirm_bash => {
++            match approve_command(state, working_dir, tool_call_id, args, turn, notify, cancel).await {
++                Ok(()) => guards::Decision::Run,
++                Err(text) => guards::Decision::Answer { text, failed: true },
++            }
++        }
++        d => d,
++    };
++    let (outcome, note, guarded) = match decision {
 +        guards::Decision::Answer { text, failed } => {
 +            debug!(tool = name, failed, "Tool call answered by the guard");
 +            (tools::ToolOutcome { output: text, failed }, None, true)
@@ -4486,20 +4866,32 @@ index b11496f..8061fe6 100644
 +    push_message(state, session_id, backend.format_tool_result(tool_call_id, &result));
 +    // Notes and the web search count are stored right away (meta too).
 +    persist_session(state, session_id, matches!(name, "notes" | "web_search"));
-+}
-+
+ }
+ 
+-/// Handle `session/prompt` — runs the LLM with tool loop.
+-///
+-/// Sends `Notification` events through `notify_tx` as they happen (for ACP streaming).
+-/// Returns the final status ("completed" or "failed") and accumulated text.
+-///
+-/// `message_id` is the opaque identifier acp-bridge mints for this
+-/// prompt. It is required on the v2 `PromptResponse` and used by v2
+-/// Clients to correlate the response with `user_message` and
+-/// `agent_message` session updates. v1 Clients ignore it.
+-pub async fn session_prompt(
 +/// [`session_prompt`] with a cancellation signal. Cancelling stops the
 +/// in-flight LLM request and any running build, and the turn ends with
 +/// status `"cancelled"`.
 +pub async fn session_prompt_with_cancel(
-+    state: &Arc<AppState>,
-+    session_id: &str,
-+    user_text: &str,
-+    user_images: &[ImageBlock],
-+    notify_tx: Option<mpsc::UnboundedSender<Notification>>,
-+    message_id: &str,
+     state: &Arc<AppState>,
+     session_id: &str,
+     user_text: &str,
+     user_images: &[ImageBlock],
+     notify_tx: Option<mpsc::UnboundedSender<Notification>>,
+     message_id: &str,
 +    cancel: &CancelToken,
-+) -> PromptResult {
+ ) -> PromptResult {
+-    let notify = |n: Notification| {
++    let can_ask = notify_tx.is_some();
 +    let notify = move |n: Notification| {
          if let Some(tx) = &notify_tx {
              let _ = tx.send(n);
@@ -4514,7 +4906,7 @@ index b11496f..8061fe6 100644
          let mut sessions = state.sessions_write();
          let session = match sessions.get_mut(session_id) {
              Some(s) => s,
-@@ -554,28 +1976,148 @@ pub async fn session_prompt(
+@@ -554,28 +2085,149 @@ pub async fn session_prompt(
              let after = session.messages.len();
              if before != after {
                  debug!(before, after, "Trimmed conversation history");
@@ -4571,6 +4963,7 @@ index b11496f..8061fe6 100644
 +        docs_calls: 0,
 +        passthrough: HashMap::new(),
 +        end_turn: None,
++        can_ask,
 +        web: None,
 +        web_calls: 0,
 +    };
@@ -4674,7 +5067,7 @@ index b11496f..8061fe6 100644
                  None => {
                      warn!(session_id, "Session removed during prompt processing");
                      had_error = true;
-@@ -585,19 +2127,151 @@ pub async fn session_prompt(
+@@ -585,19 +2237,151 @@ pub async fn session_prompt(
              }
          };
  
@@ -4828,7 +5221,7 @@ index b11496f..8061fe6 100644
                      let (clean_text, recovered) = llm::recover_tool_calls_from_content(&raw_text);
                      if !recovered.is_empty() {
                          info!(
-@@ -617,19 +2291,61 @@ pub async fn session_prompt(
+@@ -617,19 +2401,61 @@ pub async fn session_prompt(
                                  session.messages.push(assistant_msg);
                              }
                          }
@@ -4866,7 +5259,7 @@ index b11496f..8061fe6 100644
 +                                session
 +                                    .messages
 +                                    .push(json!({"role": "assistant", "content": &text}));
-+                            }
+                             }
 +                        }
 +                        let step = verify_after_final_answer(
 +                            state,
@@ -4889,7 +5282,7 @@ index b11496f..8061fe6 100644
 +                            VerifyStep::Cancelled => {
 +                                cancelled = true;
 +                                break;
-                             }
++                            }
 +                            VerifyStep::Skip => text,
 +                            VerifyStep::Finish(text) => text,
 +                        };
@@ -4899,7 +5292,7 @@ index b11496f..8061fe6 100644
                              notify(Notification::TextChunk(text));
                          }
                          break;
-@@ -648,9 +2364,16 @@ pub async fn session_prompt(
+@@ -648,9 +2474,16 @@ pub async fn session_prompt(
                      }
                  }
  
@@ -4918,7 +5311,7 @@ index b11496f..8061fe6 100644
                      // `function.arguments` can be either a JSON-encoded
                      // string (OpenAI-compatible backends) or a JSON
                      // object (Ollama native /api/chat). Handle both —
-@@ -663,29 +2386,102 @@ pub async fn session_prompt(
+@@ -663,29 +2496,106 @@ pub async fn session_prompt(
                          Some(Value::Object(_)) | Some(Value::Array(_)) => func["arguments"].clone(),
                          Some(_) | None => Value::Object(Default::default()),
                      };
@@ -4963,7 +5356,7 @@ index b11496f..8061fe6 100644
 +                    };
 +                    if name != raw_name {
 +                        info!(from = raw_name, to = %name, "Mapped an Xcode tool name");
-                     }
++                    }
 +                    let args = tools::normalize_args(&working_dir, &name, &args);
 +                    run_tool_call(
 +                        state,
@@ -4979,6 +5372,10 @@ index b11496f..8061fe6 100644
 +                        cancel,
 +                    )
 +                    .await;
++                    if turn.end_turn.is_some() {
++                        push_not_run_results(state, session_id, backend, &tool_calls[index + 1..]);
++                        break;
++                    }
 +                }
 +                if cancelled {
 +                    info!(session_id, "Turn cancelled during tool execution");
@@ -5009,7 +5406,7 @@ index b11496f..8061fe6 100644
 +                        .unwrap_or_default();
 +                    if !model_notes.trim().is_empty() {
 +                        text.push_str(&format!("\n\nMy notes:\n{}", model_notes.trim()));
-+                    }
+                     }
 +                    push_message(state, session_id, json!({"role": "assistant", "content": &text}));
 +                    let step = verify_after_final_answer(
 +                        state,
@@ -5043,7 +5440,7 @@ index b11496f..8061fe6 100644
                  }
              }
              Err(e) => {
-@@ -724,25 +2520,28 @@ pub async fn session_prompt(
+@@ -724,25 +2634,28 @@ pub async fn session_prompt(
      // keeps requesting tools. Without this the turn would be reported as a
      // successful "completed" with empty text, silently swallowing the fact
      // that the model never produced a final answer.
@@ -5081,7 +5478,7 @@ index b11496f..8061fe6 100644
  
      // Estimate the current context utilization for `usage_update`. Local
      // backends rarely stream per-turn token counts in a stable shape, so
-@@ -798,9 +2597,19 @@ pub fn estimate_tokens(messages: &[Value]) -> u64 {
+@@ -798,9 +2711,19 @@ pub fn estimate_tokens(messages: &[Value]) -> u64 {
  
  /// Handle `session/end` — removes a session.
  pub fn session_end(state: &AppState, session_id: &str) -> Result<(), AcpError> {
@@ -5101,7 +5498,7 @@ index b11496f..8061fe6 100644
          Ok(())
      } else {
          Err(AcpError::UnknownSession {
-@@ -1070,6 +2879,8 @@ mod tests {
+@@ -1070,6 +2993,8 @@ mod tests {
              session_idle_timeout_secs: 0,
              prompt_supports_image: supports_image,
              context_size: 32768,
@@ -5110,7 +5507,7 @@ index b11496f..8061fe6 100644
              client: reqwest::Client::builder()
                  .timeout(std::time::Duration::from_secs(5))
                  .build()
-@@ -1161,11 +2972,23 @@ mod tests {
+@@ -1161,11 +3086,23 @@ mod tests {
          let n = Notification::ToolStart {
              id: "tc_42".into(),
              name: "read_file".into(),
@@ -5135,7 +5532,7 @@ index b11496f..8061fe6 100644
              }
              _ => panic!("expected ToolStart"),
          }
-@@ -1177,9 +3000,13 @@ mod tests {
+@@ -1177,9 +3114,13 @@ mod tests {
              id: "tc_42".into(),
              name: "read_file".into(),
              status: "completed".into(),
@@ -5150,7 +5547,7 @@ index b11496f..8061fe6 100644
                  assert_eq!(id, "tc_42");
                  assert_eq!(name, "read_file");
                  assert_eq!(status, "completed");
-@@ -1187,4 +3014,118 @@ mod tests {
+@@ -1187,4 +3128,118 @@ mod tests {
              _ => panic!("expected ToolDone"),
          }
      }
@@ -6493,10 +6890,10 @@ index 0000000..66a2773
 +    }
 +}
 diff --git a/src/lib.rs b/src/lib.rs
-index c4440c7..8256a3a 100644
+index c4440c7..082ac06 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -1,18 +1,38 @@
+@@ -1,18 +1,40 @@
  //! acp-bridge — Library for building ACP adapters on local AI.
  //!
  //! Provides:
@@ -6507,6 +6904,7 @@ index c4440c7..8256a3a 100644
 +//! - `loopdetect` — Reasoning-loop detection
 +//! - `mcp` — Minimal MCP client (stdio + Streamable HTTP)
 +//! - `notes` — Working memory (notes tool, notes block, dropped-round summaries)
++//! - `permissions` — Asking before shell commands (Allow / Always allow / Deny)
  //! - `protocol` — JSON-RPC 2.0 types and error codes
 +//! - `store` — Session persistence (history, notes, retention)
  //! - `acp` — ACP notification/response helpers
@@ -6526,6 +6924,7 @@ index c4440c7..8256a3a 100644
  pub mod hardware;
  pub mod llm;
 +pub mod notes;
++pub mod permissions;
 +pub mod loopdetect;
 +pub mod mcp;
 +pub mod process;
@@ -7121,7 +7520,7 @@ index 0000000..b77300a
 +    }
 +}
 diff --git a/src/main.rs b/src/main.rs
-index fa7f410..53e40c5 100644
+index fa7f410..fc4144d 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -9,9 +9,11 @@ use acp_bridge::config::ConfigFile;
@@ -7319,7 +7718,31 @@ index fa7f410..53e40c5 100644
  
      loop {
          tokio::select! {
-@@ -285,10 +441,11 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
+@@ -261,7 +417,22 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
+                             continue;
+                         }
+ 
+-                        let msg: JsonRpcRequest = match serde_json::from_str(&trimmed) {
++                        let value: Value = match serde_json::from_str(&trimmed) {
++                            Ok(v) => v,
++                            Err(e) => {
++                                debug!(error = %e, "Skipping invalid JSON-RPC line");
++                                continue;
++                            }
++                        };
++                        // A response to one of our requests (permission to
++                        // run a command): no method, our id.
++                        if value.get("method").is_none() && value.get("id").is_some() {
++                            if !state.client_requests.resolve(&value) {
++                                debug!(id = %value["id"], "Ignoring a response to no pending request");
++                            }
++                            continue;
++                        }
++                        let msg: JsonRpcRequest = match serde_json::from_value(value) {
+                             Ok(m) => m,
+                             Err(e) => {
+                                 debug!(error = %e, "Skipping invalid JSON-RPC line");
+@@ -285,10 +456,11 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
                                              .get("sessionId")
                                              .and_then(|v| v.as_str())
                                              .unwrap_or("");
@@ -7335,7 +7758,7 @@ index fa7f410..53e40c5 100644
                                      }
                                      _ => {
                                          debug!(method, "Ignoring unknown notification");
-@@ -317,13 +474,14 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
+@@ -317,13 +489,14 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
                              }
                              "session/new" => {
                                  let raw_cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or("/tmp");
@@ -7355,7 +7778,7 @@ index fa7f410..53e40c5 100644
                                          // Post-creation notifications first so
                                          // Clients that want to render the
                                          // slash-command menu / session title
-@@ -350,7 +508,7 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
+@@ -350,7 +523,7 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
                                  }
                              }
                              "session/prompt" => {
@@ -7364,7 +7787,7 @@ index fa7f410..53e40c5 100644
                              }
                              "session/end" | "session/close" => {
                                  let session_id = params.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
-@@ -364,6 +522,9 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
+@@ -364,6 +537,9 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
                                      // Both share the same implementation:
                                      // remove the in-memory session. No
                                      // persistence, so re-opening is a no-op.
@@ -7374,7 +7797,7 @@ index fa7f410..53e40c5 100644
                                      match engine::session_end(&state, session_id) {
                                          Ok(()) => acp::send_response(&id, json!({"status": "ended"})),
                                          Err(e) => acp::send_error(&id, e.code(), &e.to_string()),
-@@ -371,24 +532,34 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
+@@ -371,24 +547,34 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
                                  }
                              }
                              "session/list" => {
@@ -7423,7 +7846,7 @@ index fa7f410..53e40c5 100644
                                  acp::send_error_with_data(
                                      &id,
                                      -32001,
-@@ -473,22 +644,124 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
+@@ -473,22 +659,124 @@ async fn run_acp_loop(mut state: Arc<AppState>) {
                      }
                  }
              }
@@ -7551,7 +7974,7 @@ index fa7f410..53e40c5 100644
      let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
          Some(s) => s.to_string(),
          None => {
-@@ -500,6 +773,16 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
+@@ -500,6 +788,16 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
          }
      };
  
@@ -7568,7 +7991,7 @@ index fa7f410..53e40c5 100644
      let prompt_value = params.get("prompt").cloned().unwrap_or(Value::Null);
      let prompt_kind = match &prompt_value {
          Value::Null => "null",
-@@ -536,15 +819,10 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
+@@ -536,15 +834,10 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
      // collide.
      let message_id = uuid::Uuid::new_v4().to_string();
  
@@ -7588,7 +8011,7 @@ index fa7f410..53e40c5 100644
  
      // Set up notification channel for ACP streaming
      let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<Notification>();
-@@ -553,14 +831,16 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
+@@ -553,14 +846,16 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
      let state_clone = Arc::clone(state);
      let sid = session_id.clone();
      let mid = message_id.clone();
@@ -7606,7 +8029,7 @@ index fa7f410..53e40c5 100644
          )
          .await
      });
-@@ -569,19 +849,77 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
+@@ -569,19 +864,92 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
      // through the `_for` dispatcher so v2 Clients receive v2-shaped
      // payloads (e.g. `tool_call_update` instead of `tool_call`) and v1
      // Clients receive the legacy shapes they were written against.
@@ -7638,7 +8061,9 @@ index fa7f410..53e40c5 100644
 +                    &text,
 +                    &format!("{message_id}-thought-{thought_seq}"),
 +                )
-+            }
+             }
+-            Notification::ToolDone { id, name, status } => {
+-                acp::notify_tool_done_for(state.protocol_version, &session_id, &id, &name, &status)
 +            Notification::ToolStart {
 +                id,
 +                name,
@@ -7658,9 +8083,7 @@ index fa7f410..53e40c5 100644
 +                    &content,
 +                );
 +                open_tool_calls.push(id);
-             }
--            Notification::ToolDone { id, name, status } => {
--                acp::notify_tool_done_for(state.protocol_version, &session_id, &id, &name, &status)
++            }
 +            Notification::ToolDone {
 +                id,
 +                status,
@@ -7684,12 +8107,27 @@ index fa7f410..53e40c5 100644
              Notification::TextChunk(text) => {
                  acp::notify_text_for(state.protocol_version, &session_id, &text)
              }
++            Notification::Permission {
++                request_id,
++                tool_call_id,
++                command,
++                cwd,
++                options,
++            } => acp::send_permission_request_for(
++                state.protocol_version,
++                request_id,
++                &session_id,
++                &tool_call_id,
++                &command,
++                &cwd,
++                &options,
++            ),
          }
 +        prev_was_thought = is_thought;
      }
  
      let result = handle.await.unwrap_or_else(|_| engine::PromptResult {
-@@ -597,6 +935,17 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
+@@ -597,6 +965,17 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
          message_id: message_id.clone(),
      });
  
@@ -7707,7 +8145,7 @@ index fa7f410..53e40c5 100644
      // If the engine returned a protocol error (e.g. unknown session), send JSON-RPC error
      if let Some(err) = &result.error {
          acp::send_error(&id, err.code(), &err.to_string());
-@@ -655,6 +1004,7 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
+@@ -655,6 +1034,7 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
          None,
      );
      if let Some(title) = derived_title.as_deref() {
@@ -7715,7 +8153,7 @@ index fa7f410..53e40c5 100644
          acp::notify_session_info_for(state.protocol_version, &session_id, title, None);
      }
  
-@@ -663,11 +1013,7 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
+@@ -663,11 +1043,7 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
      // sessionUpdate discriminators per the JSON-RPC spec, so it's safe
      // to always call the dispatcher (it no-ops on v1).
      if state.protocol_version == ProtocolVersion::V2 {
@@ -7728,7 +8166,7 @@ index fa7f410..53e40c5 100644
          acp::notify_state_idle_for(state.protocol_version, &session_id, Some(stop_reason));
      }
  
-@@ -682,11 +1028,7 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
+@@ -682,11 +1058,7 @@ async fn handle_acp_prompt(id: RequestId, params: &Value, state: &Arc<AppState>)
              "messageId": result.message_id,
          })
      } else {
@@ -9588,6 +10026,801 @@ index 0000000..1873bb3
 +        }
 +        let m = vec![json!({"role": "system", "content": "s"})];
 +        assert_eq!(summarize(&m, &[], "r1", "x"), None);
++    }
++}
+diff --git a/src/permissions.rs b/src/permissions.rs
+new file mode 100644
+index 0000000..3c9d75f
+--- /dev/null
++++ b/src/permissions.rs
+@@ -0,0 +1,789 @@
++//! Asking the user before the model's `bash` tool runs a command: Allow,
++//! Always allow, or Deny, as Claude Code does in the IDEs.
++//!
++//! The question goes to the client as ACP `session/request_permission`,
++//! which Xcode, Android Studio and VS Code's ACP Client show to the user.
++//! "Always allow" saves command prefixes for the session's project
++//! (`cargo test`, `git status`, `ls`); a later command runs without asking
++//! when every simple command in it starts with a saved prefix. Prefixes are
++//! kept in `<state_dir>/allowed-commands.json` (0600) when persistence is
++//! on, otherwise in memory until the process exits.
++//!
++//! The parse is conservative. A command with substitutions (`$(…)`,
++//! backticks, `<(…)`), subshells, heredocs, or output redirected to a file
++//! is never covered by a prefix and gets no "Always allow"; nor does one
++//! that starts with a shell, a wrapper that runs another command (`env`,
++//! `sudo`, `xargs`, …) or a builtin that changes the shell (`export`,
++//! `source`, …). A saved prefix allows every argument after it, so
++//! `find` also allows `find … -delete`.
++
++use serde_json::{json, Value};
++use std::collections::{BTreeMap, HashMap};
++use std::path::{Path, PathBuf};
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::Mutex;
++use tokio::sync::oneshot;
++use tracing::{info, warn};
++
++/// File name of the saved prefixes in the state directory.
++pub const RULES_FILE: &str = "allowed-commands.json";
++
++/// Option ids of the permission request.
++pub const ALLOW: &str = "allow";
++pub const ALLOW_ALWAYS: &str = "allow_always";
++pub const DENY: &str = "deny";
++
++// ---------------------------------------------------------------------------
++// Requests to the client
++// ---------------------------------------------------------------------------
++
++/// The client's answer to a request: its `result`, or its `error` message.
++pub type Reply = Result<Value, String>;
++
++/// Requests sent to the client that wait for its response. JSON-RPC ids
++/// are per sender, so these never clash with the client's own ids.
++#[derive(Default)]
++pub struct ClientRequests {
++    next: AtomicU64,
++    pending: Mutex<HashMap<u64, oneshot::Sender<Reply>>>,
++}
++
++impl ClientRequests {
++    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, oneshot::Sender<Reply>>> {
++        self.pending.lock().unwrap_or_else(|p| p.into_inner())
++    }
++
++    /// A new request id and the receiver of its response.
++    pub fn register(&self) -> (u64, oneshot::Receiver<Reply>) {
++        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
++        let (tx, rx) = oneshot::channel();
++        self.lock().insert(id, tx);
++        (id, rx)
++    }
++
++    /// Stop waiting for request `id` (its turn was cancelled).
++    pub fn forget(&self, id: u64) {
++        self.lock().remove(&id);
++    }
++
++    /// Hand a response from the client (`{id, result}` or `{id, error}`)
++    /// to its request. Returns whether a request was waiting for it.
++    pub fn resolve(&self, msg: &Value) -> bool {
++        let Some(id) = msg.get("id").and_then(Value::as_u64) else {
++            return false;
++        };
++        let Some(tx) = self.lock().remove(&id) else {
++            return false;
++        };
++        let reply = match msg.get("error") {
++            Some(e) => Err(e
++                .get("message")
++                .and_then(Value::as_str)
++                .unwrap_or("error without a message")
++                .to_string()),
++            None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
++        };
++        let _ = tx.send(reply);
++        true
++    }
++}
++
++// ---------------------------------------------------------------------------
++// The user's decision
++// ---------------------------------------------------------------------------
++
++/// What the user decided about one command.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum Decision {
++    Allow,
++    AllowAlways,
++    Deny,
++    /// The client answered `cancelled` (the turn was stopped, or the
++    /// prompt was dismissed).
++    Cancelled,
++    /// The client answered with an error.
++    Failed(String),
++}
++
++/// Read the client's `RequestPermissionResponse`. Anything that is not a
++/// selected allow option is not an approval.
++pub fn decision(reply: Reply) -> Decision {
++    let result = match reply {
++        Ok(r) => r,
++        Err(e) => return Decision::Failed(e),
++    };
++    let outcome = &result["outcome"];
++    match outcome["outcome"].as_str() {
++        Some("selected") => match outcome["optionId"].as_str() {
++            Some(ALLOW) => Decision::Allow,
++            Some(ALLOW_ALWAYS) => Decision::AllowAlways,
++            _ => Decision::Deny,
++        },
++        Some("cancelled") => Decision::Cancelled,
++        _ => Decision::Deny,
++    }
++}
++
++/// The options shown to the user: Allow, "Always allow" when the command
++/// can be covered by prefixes, Deny. Allow comes first: clients set to
++/// approve everything pick the first allow option (VS Code's
++/// `acp.autoApprovePermissions: allowAll`), which then saves no prefix.
++pub fn options(prefixes: Option<&[String]>) -> Vec<Value> {
++    let mut opts = vec![json!({"optionId": ALLOW, "name": "Allow", "kind": "allow_once"})];
++    if let Some(prefixes) = prefixes.filter(|p| !p.is_empty()) {
++        let list = prefixes
++            .iter()
++            .map(|p| format!("\"{p} …\""))
++            .collect::<Vec<_>>()
++            .join(", ");
++        opts.push(json!({
++            "optionId": ALLOW_ALWAYS,
++            "name": format!("Always allow {list} in this project"),
++            "kind": "allow_always"
++        }));
++    }
++    opts.push(json!({"optionId": DENY, "name": "Deny", "kind": "reject_once"}));
++    opts
++}
++
++/// Longest command shown in the prompt's title.
++const MAX_PROMPT_CHARS: usize = 2000;
++
++/// The whole command on one line for the prompt's title (VS Code shows
++/// only the title): line breaks become ` ⏎ ` so no line is hidden.
++pub fn prompt_title(command: &str) -> String {
++    let flat = command.trim().replace("\r\n", "\n").replace('\n', " ⏎ ");
++    let total = flat.chars().count();
++    if total <= MAX_PROMPT_CHARS {
++        return flat;
++    }
++    let head: String = flat.chars().take(MAX_PROMPT_CHARS).collect();
++    format!("{head}… ({} more characters)", total - MAX_PROMPT_CHARS)
++}
++
++// ---------------------------------------------------------------------------
++// Parsing a command line
++// ---------------------------------------------------------------------------
++
++/// One simple command of a command line.
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct Simple {
++    /// Words with quotes and escapes removed; redirections left out.
++    words: Vec<String>,
++    /// Output goes to a file (`>`, `>>`, `&>`, `<>`), not `/dev/null` or
++    /// another descriptor.
++    writes: bool,
++}
++
++#[derive(Default)]
++struct Parser {
++    out: Vec<Simple>,
++    words: Vec<String>,
++    word: String,
++    /// A word has started (`""` is a word too).
++    in_word: bool,
++    writes: bool,
++    /// The next word is a redirection target: `Some(true)` for output,
++    /// `Some(false)` for input. `dup` = after `>&` / `<&`.
++    target: Option<bool>,
++    dup: bool,
++}
++
++impl Parser {
++    fn finish_word(&mut self) {
++        if !self.in_word {
++            return;
++        }
++        let word = std::mem::take(&mut self.word);
++        self.in_word = false;
++        match self.target.take() {
++            Some(output) => {
++                let to_fd = self.dup && (word == "-" || word.chars().all(|c| c.is_ascii_digit()));
++                if output && !to_fd && word != "/dev/null" {
++                    self.writes = true;
++                }
++                self.dup = false;
++            }
++            None => self.words.push(word),
++        }
++    }
++
++    /// End the simple command; `false` when a redirection has no target.
++    fn finish_command(&mut self) -> bool {
++        self.finish_word();
++        if self.target.is_some() {
++            return false;
++        }
++        if !self.words.is_empty() {
++            self.out.push(Simple {
++                words: std::mem::take(&mut self.words),
++                writes: self.writes,
++            });
++        }
++        self.writes = false;
++        true
++    }
++
++    /// Start a redirection; digits right before it are its descriptor.
++    fn redirect(&mut self, output: bool) {
++        if self.in_word && !self.word.is_empty() && self.word.chars().all(|c| c.is_ascii_digit()) {
++            self.word.clear();
++            self.in_word = false;
++        }
++        self.finish_word();
++        self.target = Some(output);
++        self.dup = false;
++    }
++}
++
++/// The simple commands of `command`, split at `;`, `&&`, `||`, `|`, `|&`,
++/// `&` and line breaks. `None` when it uses anything a prefix can't vouch
++/// for: command or process substitution, subshells, heredocs, unbalanced
++/// quotes, a redirection without a target.
++fn parse(command: &str) -> Option<Vec<Simple>> {
++    let mut p = Parser::default();
++    let mut chars = command.chars().peekable();
++    while let Some(c) = chars.next() {
++        match c {
++            ' ' | '\t' => p.finish_word(),
++            '\n' | ';' => {
++                if !p.finish_command() {
++                    return None;
++                }
++            }
++            '#' if !p.in_word => {
++                while chars.peek().is_some_and(|&c| c != '\n') {
++                    chars.next();
++                }
++            }
++            '\\' => match chars.next() {
++                Some('\n') => {}
++                Some(c) => {
++                    p.word.push(c);
++                    p.in_word = true;
++                }
++                None => return None,
++            },
++            '\'' => {
++                p.in_word = true;
++                loop {
++                    match chars.next() {
++                        Some('\'') => break,
++                        Some(c) => p.word.push(c),
++                        None => return None,
++                    }
++                }
++            }
++            '"' => {
++                p.in_word = true;
++                loop {
++                    match chars.next() {
++                        Some('"') => break,
++                        Some('`') => return None,
++                        Some('$') if chars.peek() == Some(&'(') => return None,
++                        Some('\\') => match chars.next() {
++                            Some('\n') => {}
++                            Some(c @ ('$' | '`' | '"' | '\\')) => p.word.push(c),
++                            Some(c) => {
++                                p.word.push('\\');
++                                p.word.push(c);
++                            }
++                            None => return None,
++                        },
++                        Some(c) => p.word.push(c),
++                        None => return None,
++                    }
++                }
++            }
++            '`' | '(' | ')' => return None,
++            '$' if chars.peek() == Some(&'(') => return None,
++            '|' => {
++                if matches!(chars.peek(), Some('|') | Some('&')) {
++                    chars.next();
++                }
++                if !p.finish_command() {
++                    return None;
++                }
++            }
++            '&' => match chars.peek() {
++                Some('>') => {
++                    chars.next();
++                    if chars.peek() == Some(&'>') {
++                        chars.next();
++                    }
++                    p.redirect(true);
++                }
++                Some('&') => {
++                    chars.next();
++                    if !p.finish_command() {
++                        return None;
++                    }
++                }
++                _ => {
++                    if !p.finish_command() {
++                        return None;
++                    }
++                }
++            },
++            '>' => {
++                if chars.peek() == Some(&'(') {
++                    return None;
++                }
++                p.redirect(true);
++                if matches!(chars.peek(), Some('>') | Some('|')) {
++                    chars.next();
++                }
++                if chars.peek() == Some(&'&') {
++                    chars.next();
++                    p.dup = true;
++                }
++            }
++            '<' => match chars.peek() {
++                Some('<') | Some('(') => return None,
++                Some('>') => {
++                    chars.next();
++                    p.redirect(true);
++                }
++                Some('&') => {
++                    chars.next();
++                    p.redirect(false);
++                    p.dup = true;
++                }
++                _ => p.redirect(false),
++            },
++            c => {
++                p.word.push(c);
++                p.in_word = true;
++            }
++        }
++    }
++    if !p.finish_command() {
++        return None;
++    }
++    Some(p.out)
++}
++
++// ---------------------------------------------------------------------------
++// Prefixes
++// ---------------------------------------------------------------------------
++
++/// Never offered as a prefix: shells, wrappers that run another command,
++/// builtins that change the shell, and shell keywords.
++const NO_PREFIX: &[&str] = &[
++    "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "env", "sudo", "su", "doas",
++    "xargs", "nohup", "nice", "ionice", "timeout", "time", "watch", "caffeinate", "script",
++    "parallel", "exec", "eval", "source", ".", "command", "builtin", "export", "alias",
++    "unalias", "set", "unset", "trap", "declare", "typeset", "readonly", "local", "enable",
++    "hash", "shopt", "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done",
++    "case", "esac", "function", "select", "coproc", "!", "{", "}", "[[", "]]",
++];
++
++/// Programs whose prefix includes the subcommand (`git status`, not
++/// `git`). Without a plain subcommand after them (`git -C x status`)
++/// no prefix is offered. Interpreters are here so a prefix names the
++/// script (`python3 tool.py`), never `python3 -c`.
++const WITH_SUBCOMMAND: &[&str] = &[
++    "git", "cargo", "rustup", "npm", "pnpm", "yarn", "bun", "npx", "pnpx", "bunx", "deno",
++    "node", "uv", "uvx", "pip", "pip3", "python", "python3", "poetry", "ruby", "bundle", "rake",
++    "perl", "php", "swift", "xcrun", "xcodebuild", "go", "gradle", "gradlew", "mvn", "docker",
++    "kubectl", "brew", "dotnet", "flutter", "dart", "gh", "adb", "pod",
++];
++
++/// A subcommand or script name: no flags, variables, globs or quotes.
++fn plain(word: &str) -> bool {
++    let mut chars = word.chars();
++    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
++        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/' | '@' | '+'))
++}
++
++/// A program name or path.
++fn program(word: &str) -> bool {
++    !word.is_empty()
++        && word
++            .chars()
++            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '+' | '@'))
++}
++
++/// The prefix offered for one simple command, if any: the program, plus
++/// the subcommand for [`WITH_SUBCOMMAND`] programs (and the script for
++/// `npm run x` / `python3 -m x`).
++fn prefix_for(simple: &Simple) -> Option<String> {
++    if simple.writes {
++        return None;
++    }
++    let words = &simple.words;
++    let first = words.first()?;
++    if !program(first) || NO_PREFIX.contains(&first.as_str()) {
++        return None;
++    }
++    let base = first.rsplit('/').next().unwrap_or(first);
++    if !WITH_SUBCOMMAND.contains(&base) {
++        return Some(first.clone());
++    }
++    let second = words.get(1)?;
++    let third_needed = match base {
++        "npm" | "pnpm" | "yarn" | "bun" => second == "run" || second == "run-script",
++        "python" | "python3" => second == "-m",
++        _ => false,
++    };
++    if third_needed {
++        let third = words.get(2).filter(|w| plain(w))?;
++        return Some(format!("{first} {second} {third}"));
++    }
++    plain(second).then(|| format!("{first} {second}"))
++}
++
++/// Whether saved prefix `rule` covers `simple`: its words start with the
++/// rule's words, and it writes no file.
++fn covers(rule: &str, simple: &Simple) -> bool {
++    let rule: Vec<&str> = rule.split_whitespace().collect();
++    !simple.writes
++        && !rule.is_empty()
++        && simple.words.len() >= rule.len()
++        && rule.iter().zip(&simple.words).all(|(r, w)| r == w)
++}
++
++/// Whether `rules` cover every simple command of `command`.
++pub fn covered(rules: &[String], command: &str) -> bool {
++    match parse(command) {
++        Some(simple) if !simple.is_empty() => simple.iter().all(|s| rules.iter().any(|r| covers(r, s))),
++        _ => false,
++    }
++}
++
++/// The prefixes "Always allow" would add for `command`, given the saved
++/// `rules`: one per simple command not covered yet. `None` when some
++/// simple command can't get a prefix (then only Allow / Deny are offered).
++pub fn new_prefixes(rules: &[String], command: &str) -> Option<Vec<String>> {
++    let simple = parse(command)?;
++    let mut out: Vec<String> = Vec::new();
++    for s in simple.iter().filter(|s| !rules.iter().any(|r| covers(r, s))) {
++        let p = prefix_for(s)?;
++        if !out.contains(&p) {
++            out.push(p);
++        }
++    }
++    (!out.is_empty()).then_some(out)
++}
++
++// ---------------------------------------------------------------------------
++// Saved prefixes
++// ---------------------------------------------------------------------------
++
++/// The "Always allow" prefixes per project directory.
++pub struct CommandRules {
++    /// `<state_dir>/allowed-commands.json`; `None` keeps them in memory.
++    file: Option<PathBuf>,
++    memory: Mutex<BTreeMap<String, Vec<String>>>,
++}
++
++impl CommandRules {
++    /// Rules saved in `state_dir` (persistence on) or in memory (`None`).
++    pub fn new(state_dir: Option<&Path>) -> Self {
++        Self {
++            file: state_dir.map(|d| d.join(RULES_FILE)),
++            memory: Mutex::default(),
++        }
++    }
++
++    /// Where the rules are saved, if on disk.
++    pub fn file(&self) -> Option<&Path> {
++        self.file.as_deref()
++    }
++
++    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Vec<String>>> {
++        self.memory.lock().unwrap_or_else(|p| p.into_inner())
++    }
++
++    /// All projects' rules. The file is read every time, so another
++    /// acp-bridge process (another IDE window) sees new rules at once and
++    /// hand edits apply without a restart.
++    fn load(&self) -> BTreeMap<String, Vec<String>> {
++        let Some(file) = &self.file else {
++            return self.lock().clone();
++        };
++        let text = match std::fs::read_to_string(file) {
++            Ok(t) => t,
++            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
++            Err(e) => {
++                warn!(file = %file.display(), error = %e, "Cannot read the saved command rules");
++                return BTreeMap::new();
++            }
++        };
++        match serde_json::from_str::<Value>(&text) {
++            Ok(v) => v["projects"]
++                .as_object()
++                .map(|projects| {
++                    projects
++                        .iter()
++                        .map(|(dir, rules)| {
++                            let rules = rules
++                                .as_array()
++                                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
++                                .unwrap_or_default();
++                            (dir.clone(), rules)
++                        })
++                        .collect()
++                })
++                .unwrap_or_default(),
++            Err(e) => {
++                warn!(file = %file.display(), error = %e, "Saved command rules are not valid JSON; ignoring them");
++                BTreeMap::new()
++            }
++        }
++    }
++
++    /// The saved prefixes of `project`.
++    pub fn rules(&self, project: &Path) -> Vec<String> {
++        self.load()
++            .remove(project.to_string_lossy().as_ref())
++            .unwrap_or_default()
++    }
++
++    /// Save `prefixes` for `project`.
++    pub fn add(&self, project: &Path, prefixes: &[String]) {
++        let mut all = self.load();
++        let rules = all.entry(project.to_string_lossy().into_owned()).or_default();
++        for p in prefixes {
++            if !rules.contains(p) {
++                rules.push(p.clone());
++            }
++        }
++        rules.sort();
++        info!(project = %project.display(), prefixes = ?prefixes, "Always allowing commands");
++        let Some(file) = &self.file else {
++            *self.lock() = all;
++            return;
++        };
++        let body = json!({ "projects": all });
++        let text = serde_json::to_string_pretty(&body).unwrap_or_default() + "\n";
++        if let Err(e) = write_private(file, text.as_bytes()) {
++            warn!(file = %file.display(), error = %e, "Cannot save the command rules; they apply to this turn only");
++        }
++    }
++}
++
++/// Write `contents` to `path` (0600) through a temporary file of this
++/// process, so two acp-bridge processes never write the same temporary file.
++fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
++    use std::io::Write;
++    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
++    {
++        let mut opts = std::fs::OpenOptions::new();
++        opts.create(true).write(true).truncate(true);
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::OpenOptionsExt;
++            opts.mode(0o600);
++        }
++        let mut f = opts.open(&tmp)?;
++        f.write_all(contents)?;
++        f.flush()?;
++    }
++    std::fs::rename(&tmp, path)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn words(command: &str) -> Vec<Vec<String>> {
++        parse(command)
++            .unwrap()
++            .into_iter()
++            .map(|s| s.words)
++            .collect()
++    }
++
++    fn rules(list: &[&str]) -> Vec<String> {
++        list.iter().map(|s| s.to_string()).collect()
++    }
++
++    #[test]
++    fn splits_simple_commands() {
++        assert_eq!(words("ls -la src"), vec![vec!["ls", "-la", "src"]]);
++        assert_eq!(
++            words("cd app && cargo test 2>&1 | tail -n 20; echo done"),
++            vec![
++                vec!["cd", "app"],
++                vec!["cargo", "test"],
++                vec!["tail", "-n", "20"],
++                vec!["echo", "done"]
++            ]
++        );
++        assert_eq!(words("a || b & c |& d\ne"), vec![vec!["a"], vec!["b"], vec!["c"], vec!["d"], vec!["e"]]);
++        assert_eq!(
++            words(r#"git commit -m "fix: a; b" 'x && y' c\ d"#),
++            vec![vec!["git", "commit", "-m", "fix: a; b", "x && y", "c d"]]
++        );
++        assert_eq!(words("ls # rm -rf /\npwd"), vec![vec!["ls"], vec!["pwd"]]);
++        assert_eq!(words("echo \"\" x"), vec![vec!["echo", "", "x"]]);
++        assert!(words("  ").is_empty());
++    }
++
++    #[test]
++    fn refuses_what_a_prefix_cannot_vouch_for() {
++        for c in [
++            "echo $(rm -rf x)",
++            "echo `id`",
++            "echo \"$(id)\"",
++            "diff <(ls a) <(ls b)",
++            "tee >(cat)",
++            "(cd x && rm y)",
++            "cat <<EOF\nrm -rf x\nEOF",
++            "cat <<< hi",
++            "echo 'unterminated",
++            "echo \"unterminated",
++            "ls >",
++            "f() { rm x; }",
++        ] {
++            assert!(parse(c).is_none(), "{c}");
++        }
++    }
++
++    #[test]
++    fn redirections() {
++        let s = parse("cargo test > out.txt").unwrap();
++        assert!(s[0].writes);
++        assert_eq!(s[0].words, vec!["cargo", "test"]);
++        for c in ["make >> log", "make &> log", "make 2> err", "make >| f", "make >&f", "cat <> f"] {
++            assert!(parse(c).unwrap()[0].writes, "{c}");
++        }
++        for c in ["make 2>&1", "make >/dev/null 2>&1", "make &>/dev/null", "make >&2", "wc -l < f", "cat <&3", "make 2>&-"] {
++            assert!(!parse(c).unwrap()[0].writes, "{c}");
++        }
++        // Only the command with the redirection writes.
++        let s = parse("ls > f; pwd").unwrap();
++        assert!(s[0].writes && !s[1].writes);
++    }
++
++    #[test]
++    fn prefixes_offered() {
++        let p = |c: &str| new_prefixes(&[], c);
++        assert_eq!(p("ls -la src"), Some(rules(&["ls"])));
++        assert_eq!(p("git status --short"), Some(rules(&["git status"])));
++        assert_eq!(p("git log --oneline -5"), Some(rules(&["git log"])));
++        assert_eq!(p("cargo test --offline"), Some(rules(&["cargo test"])));
++        assert_eq!(p("npm run build"), Some(rules(&["npm run build"])));
++        assert_eq!(p("python3 -m pytest -q"), Some(rules(&["python3 -m pytest"])));
++        assert_eq!(p("python3 tools/gen.py --all"), Some(rules(&["python3 tools/gen.py"])));
++        assert_eq!(p("./gradlew assembleDebug --offline"), Some(rules(&["./gradlew assembleDebug"])));
++        assert_eq!(p("cd app && cargo test && cargo test"), Some(rules(&["cd", "cargo test"])));
++        assert_eq!(p("grep -rn foo src | head"), Some(rules(&["grep", "head"])));
++        // No prefix: a wrapper, a builtin, a flag before the subcommand,
++        // `-c` code, a variable, a file write, an assignment.
++        for c in [
++            "bash -c 'rm -rf x'",
++            "sh script.sh",
++            "env FOO=1 make",
++            "sudo ls",
++            "find . | xargs rm",
++            "export PATH=/tmp:$PATH",
++            "source venv/bin/activate",
++            "git -C other status",
++            "python3 -c 'print(1)'",
++            "npm run",
++            "$EDITOR file",
++            "echo hi > notes.txt",
++            "FOO=1 make",
++            "for f in *; do rm $f; done",
++        ] {
++            assert_eq!(p(c), None, "{c}");
++        }
++        // Already covered parts are not offered again.
++        assert_eq!(new_prefixes(&rules(&["cd"]), "cd app && cargo test"), Some(rules(&["cargo test"])));
++        assert_eq!(new_prefixes(&rules(&["ls"]), "ls"), None);
++    }
++
++    #[test]
++    fn coverage() {
++        let r = rules(&["git status", "cargo test", "ls", "cd"]);
++        assert!(covered(&r, "git status"));
++        assert!(covered(&r, "git status --short"));
++        assert!(covered(&r, "cd app && cargo test --offline 2>&1"));
++        assert!(covered(&r, "'git' \"status\""));
++        assert!(!covered(&r, "git statusx"));
++        assert!(!covered(&r, "git push"));
++        assert!(!covered(&r, "git"));
++        assert!(!covered(&r, "ls; rm -rf x"));
++        assert!(!covered(&r, "ls > files.txt"));
++        assert!(!covered(&r, "ls $(rm x)"));
++        assert!(!covered(&r, "FOO=1 cargo test"));
++        assert!(!covered(&r, ""));
++        assert!(!covered(&[], "ls"));
++    }
++
++    #[test]
++    fn options_and_decisions() {
++        let opts = options(Some(&rules(&["cd", "cargo test"])));
++        assert_eq!(opts.len(), 3);
++        assert_eq!(opts[0]["kind"], "allow_once");
++        assert_eq!(opts[1]["kind"], "allow_always");
++        assert_eq!(opts[1]["name"], "Always allow \"cd …\", \"cargo test …\" in this project");
++        assert_eq!(opts[2]["kind"], "reject_once");
++        assert_eq!(options(None).len(), 2);
++
++        let selected = |id: &str| Ok(json!({"outcome": {"outcome": "selected", "optionId": id}}));
++        assert_eq!(decision(selected(ALLOW)), Decision::Allow);
++        assert_eq!(decision(selected(ALLOW_ALWAYS)), Decision::AllowAlways);
++        assert_eq!(decision(selected(DENY)), Decision::Deny);
++        assert_eq!(decision(selected("something-else")), Decision::Deny);
++        assert_eq!(decision(Ok(json!({"outcome": {"outcome": "cancelled"}}))), Decision::Cancelled);
++        assert_eq!(decision(Ok(json!({"outcome": {"outcome": "_custom"}}))), Decision::Deny);
++        assert_eq!(decision(Ok(json!(null))), Decision::Deny);
++        assert_eq!(decision(Err("nope".into())), Decision::Failed("nope".into()));
++    }
++
++    #[test]
++    fn prompt_title_shows_every_line() {
++        assert_eq!(prompt_title("cd x\nmake"), "cd x ⏎ make");
++        let long = prompt_title(&"x".repeat(MAX_PROMPT_CHARS + 5));
++        assert!(long.ends_with("… (5 more characters)"));
++    }
++
++    #[test]
++    fn client_requests_round_trip() {
++        let reqs = ClientRequests::default();
++        let (a, mut rx_a) = reqs.register();
++        let (b, mut rx_b) = reqs.register();
++        assert_ne!(a, b);
++        assert!(reqs.resolve(&json!({"jsonrpc": "2.0", "id": a, "result": {"ok": 1}})));
++        assert_eq!(rx_a.try_recv().unwrap(), Ok(json!({"ok": 1})));
++        assert!(reqs.resolve(&json!({"id": b, "error": {"code": -32601, "message": "Method not found"}})));
++        assert_eq!(rx_b.try_recv().unwrap(), Err("Method not found".to_string()));
++        assert!(!reqs.resolve(&json!({"id": a, "result": {}})), "answered once");
++        let (c, _rx) = reqs.register();
++        reqs.forget(c);
++        assert!(!reqs.resolve(&json!({"id": c, "result": {}})));
++    }
++
++    #[test]
++    fn rules_saved_per_project() {
++        let dir = std::env::temp_dir().join(format!("acp-rules-{}", uuid::Uuid::new_v4()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let saved = CommandRules::new(Some(&dir));
++        let (p1, p2) = (Path::new("/work/one"), Path::new("/work/two"));
++        assert!(saved.rules(p1).is_empty());
++        saved.add(p1, &rules(&["git status", "cd"]));
++        saved.add(p1, &rules(&["cd"]));
++        assert_eq!(saved.rules(p1), rules(&["cd", "git status"]));
++        assert!(saved.rules(p2).is_empty());
++        // Another process sees them; the file is private.
++        assert_eq!(CommandRules::new(Some(&dir)).rules(p1), rules(&["cd", "git status"]));
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt;
++            let mode = std::fs::metadata(dir.join(RULES_FILE)).unwrap().permissions().mode() & 0o777;
++            assert_eq!(mode, 0o600);
++        }
++        // A broken file is ignored, not fatal.
++        std::fs::write(dir.join(RULES_FILE), "not json").unwrap();
++        assert!(saved.rules(p1).is_empty());
++        let _ = std::fs::remove_dir_all(&dir);
++
++        let memory = CommandRules::new(None);
++        memory.add(p1, &rules(&["ls"]));
++        assert_eq!(memory.rules(p1), rules(&["ls"]));
++        assert!(memory.file().is_none());
 +    }
 +}
 diff --git a/src/process.rs b/src/process.rs
@@ -18507,10 +19740,19 @@ index 0000000..4c338e7
 +    }
 +}
 diff --git a/tests/integration_test.rs b/tests/integration_test.rs
-index 52e297b..77db79e 100644
+index 52e297b..d350528 100644
 --- a/tests/integration_test.rs
 +++ b/tests/integration_test.rs
-@@ -454,19 +454,19 @@ async fn test_session_prompt_streaming() {
+@@ -184,6 +184,8 @@ impl TestHarness {
+             .env("LLM_API_KEY", "test-key")
+             .env("LLM_TIMEOUT", "10")
+             .env("LLM_MAX_HISTORY_TURNS", "5")
++            // `bash` runs without asking (tests/tooling_test.rs answers the prompt).
++            .env("LLM_CONFIRM_BASH", "0")
+             .env("RUST_LOG", "acp_bridge=debug");
+         for (k, v) in extra_env {
+             cmd.env(k, v);
+@@ -454,19 +456,19 @@ async fn test_session_prompt_streaming() {
      let full_text: String = text_chunks.join("");
      assert_eq!(full_text, "Hello world");
  
@@ -18542,7 +19784,7 @@ index 52e297b..77db79e 100644
  
      assert_eq!(response["result"]["status"], "completed");
  
-@@ -1121,10 +1121,15 @@ async fn mock_chat_completions_always_tool() -> impl IntoResponse {
+@@ -1121,10 +1123,15 @@ async fn mock_chat_completions_always_tool() -> impl IntoResponse {
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn test_tool_round_limit_surfaces_failure() {
      let port = free_port();
@@ -18559,7 +19801,7 @@ index 52e297b..77db79e 100644
      )
      .await;
  
-@@ -1317,10 +1322,13 @@ async fn test_initialize_does_not_advertise_image_by_default() {
+@@ -1317,10 +1324,13 @@ async fn test_initialize_does_not_advertise_image_by_default() {
  /// without it the per-tool timeline collapses and rendering degrades.
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn test_tool_call_notification_carries_tool_call_id_and_kind() {
@@ -18576,7 +19818,7 @@ index 52e297b..77db79e 100644
  
      h.send(&json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}));
      let resp = h.read_line();
-@@ -1375,6 +1383,16 @@ async fn test_tool_call_notification_carries_tool_call_id_and_kind() {
+@@ -1375,6 +1385,16 @@ async fn test_tool_call_notification_carries_tool_call_id_and_kind() {
          assert!(title.is_some(), "tool_call must include title, got {n}");
      }
  
@@ -18593,7 +19835,7 @@ index 52e297b..77db79e 100644
      // Every tool_call_update must also carry toolCallId and a valid status.
      let tool_updates: Vec<&Value> = notifications
          .iter()
-@@ -1395,19 +1413,98 @@ async fn test_tool_call_notification_carries_tool_call_id_and_kind() {
+@@ -1395,19 +1415,98 @@ async fn test_tool_call_notification_carries_tool_call_id_and_kind() {
              matches!(status, "pending" | "in_progress" | "completed" | "failed"),
              "tool_call_update.status must be one of pending/in_progress/completed/failed, got {status:?}"
          );
@@ -18697,7 +19939,7 @@ index 52e297b..77db79e 100644
  
      h.send(&json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}));
      let resp = h.read_line();
-@@ -1418,32 +1515,982 @@ async fn test_thought_chunk_carries_content_block() {
+@@ -1418,32 +1517,982 @@ async fn test_thought_chunk_carries_content_block() {
          "params":{"sessionId":&sid,"prompt":[{"type":"text","text":"say hello"}]}
      }));
  
@@ -20054,10 +21296,10 @@ index 244f682..3875bee 100644
  #[test]
 diff --git a/tests/tooling_test.rs b/tests/tooling_test.rs
 new file mode 100644
-index 0000000..f74d096
+index 0000000..c74e196
 --- /dev/null
 +++ b/tests/tooling_test.rs
-@@ -0,0 +1,2308 @@
+@@ -0,0 +1,2525 @@
 +//! End-to-end tests for the agent tooling (quick fixes, guards, Xcode
 +//! aliases, loop check, rawOutput, notes, MCP / xcode-tools, web search,
 +//! persistence). Each test spawns the acp-bridge binary, talks ACP over
@@ -20242,6 +21484,8 @@ index 0000000..f74d096
 +            // test turns them on.
 +            .env("LLM_WEB_SEARCH", "off")
 +            .env("LLM_PERSIST", "0")
++            // `bash` runs without asking unless a test answers the prompt.
++            .env("LLM_CONFIRM_BASH", "0")
 +            .env_remove("LLM_WEB_ALLOWLIST");
 +        for (k, v) in env {
 +            cmd.env(k, v);
@@ -22365,4 +23609,219 @@ index 0000000..f74d096
 +    let stderr = b.shutdown();
 +    assert!(stderr.contains("Not starting MCP server: arguments refused"), "{stderr}");
 +    let _ = std::fs::remove_dir_all(&dir);
++}
++
++// ---------------------------------------------------------------------------
++// Asking before shell commands
++// ---------------------------------------------------------------------------
++
++/// Wait for the bridge's `session/request_permission`; returns the
++/// messages before it and the request.
++fn permission_request(b: &mut Bridge) -> (Vec<Value>, Value) {
++    let mut seen = b.wait_for(Duration::from_secs(30), |m| m["method"] == "session/request_permission");
++    let req = seen.pop().unwrap();
++    (seen, req)
++}
++
++fn answer_permission(b: &mut Bridge, req: &Value, outcome: Value) {
++    b.send(&json!({"jsonrpc": "2.0", "id": req["id"], "result": {"outcome": outcome}}));
++}
++
++fn selected(option: &str) -> Value {
++    json!({"outcome": "selected", "optionId": option})
++}
++
++fn prompt_request(b: &mut Bridge, sid: &str, text: &str) -> u64 {
++    b.request("session/prompt", json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}))
++}
++
++fn asked(notes: &[Value]) -> bool {
++    notes.iter().any(|m| m["method"] == "session/request_permission")
++}
++
++/// The model's command waits for the user: the IDE gets the tool call
++/// first, then Allow / Always allow "echo …" / Deny. Always allow runs it
++/// and saves the prefix for the project, so later `echo` commands run
++/// without asking, in another process too. Another program still asks,
++/// and Allow saves nothing.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn ask_always_allow_saves_the_prefix() {
++    let root = fresh_dir("ask-always");
++    let project = root.join("project");
++    std::fs::create_dir_all(&project).unwrap();
++    let state = root.join("state");
++    let env = [("LLM_CONFIRM_BASH", "1"), ("LLM_PERSIST", "1"), ("LLM_STATE_DIR", state.to_str().unwrap())];
++    let replies = vec![
++        tool_call("b1", "bash", json!({"command": "echo first && echo again"})),
++        answer("one"),
++        tool_call("b2", "bash", json!({"command": "echo second"})),
++        answer("two"),
++        tool_call("b3", "bash", json!({"command": "pwd"})),
++        answer("three"),
++    ];
++    let (mut b, _) = Bridge::start(script(replies), &env).await;
++    b.initialize(1);
++    let sid = b.new_session(project.to_str().unwrap(), json!([]));
++    let id = prompt_request(&mut b, &sid, "run");
++    let (before, req) = permission_request(&mut b);
++    assert_eq!(updates(&before, "tool_call")[0]["toolCallId"], "b1", "the tool call is shown first");
++    let p = &req["params"];
++    assert_eq!(p["sessionId"], sid.as_str());
++    assert_eq!(p["toolCall"]["toolCallId"], "b1");
++    assert_eq!(p["toolCall"]["kind"], "execute");
++    assert_eq!(p["toolCall"]["title"], "echo first && echo again");
++    assert_eq!(p["toolCall"]["rawInput"]["command"], "echo first && echo again");
++    let kinds: Vec<&str> = p["options"].as_array().unwrap().iter().map(|o| o["kind"].as_str().unwrap()).collect();
++    assert_eq!(kinds, ["allow_once", "allow_always", "reject_once"]);
++    assert_eq!(p["options"][1]["name"], "Always allow \"echo …\" in this project");
++    let always = p["options"][1]["optionId"].as_str().unwrap().to_string();
++    answer_permission(&mut b, &req, selected(&always));
++    let (notes, r) = b.until_response(id, Duration::from_secs(30));
++    assert_eq!(r["result"]["text"], "one", "{r}");
++    let done = updates(&notes, "tool_call_update");
++    assert_eq!(done.last().unwrap()["status"], "completed");
++    let rules = || -> Value {
++        let saved: Value =
++            serde_json::from_str(&std::fs::read_to_string(state.join("allowed-commands.json")).unwrap()).unwrap();
++        let projects = saved["projects"].as_object().unwrap();
++        assert_eq!(projects.len(), 1, "{saved}");
++        projects.values().next().unwrap().clone()
++    };
++    assert_eq!(rules(), json!(["echo"]));
++
++    let (notes, r) = b.prompt(&sid, "again");
++    assert_eq!(r["result"]["text"], "two", "{r}");
++    assert!(!asked(&notes), "covered by the saved prefix");
++    assert_eq!(updates(&notes, "tool_call_update").last().unwrap()["status"], "completed");
++
++    let id = prompt_request(&mut b, &sid, "where");
++    let (_, req) = permission_request(&mut b);
++    assert_eq!(req["params"]["options"][1]["name"], "Always allow \"pwd …\" in this project");
++    answer_permission(&mut b, &req, selected("allow"));
++    let (_, r) = b.until_response(id, Duration::from_secs(30));
++    assert_eq!(r["result"]["text"], "three", "{r}");
++    assert_eq!(rules(), json!(["echo"]), "Allow saves nothing");
++    b.shutdown();
++
++    let replies = vec![tool_call("b4", "bash", json!({"command": "echo elsewhere"})), answer("four")];
++    let (mut b, _) = Bridge::start(script(replies), &env).await;
++    b.initialize(1);
++    let sid = b.new_session(project.to_str().unwrap(), json!([]));
++    let (notes, r) = b.prompt(&sid, "again");
++    assert_eq!(r["result"]["text"], "four", "{r}");
++    assert!(!asked(&notes), "another process reads the saved prefix");
++    b.shutdown();
++    let _ = std::fs::remove_dir_all(&root);
++}
++
++/// Deny: the command does not run, its row fails with the reason, the
++/// round's other call is neither asked about nor run, and the turn ends
++/// with a question, without another model request. The model sees both
++/// results on the next turn.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn ask_deny_ends_the_turn() {
++    let project = fresh_dir("ask-deny");
++    let call = |id: &str, file: &str| {
++        json!({"id": id, "type": "function", "function": {"name": "bash",
++               "arguments": json!({"command": format!("touch {file}")}).to_string()}})
++    };
++    let two_calls = Reply::Message(
++        json!({"role": "assistant", "content": "", "tool_calls": [call("d1", "one"), call("d2", "two")]}),
++        "tool_calls",
++    );
++    let (mut b, recorded) = Bridge::start(script(vec![two_calls, answer("next")]), &[("LLM_CONFIRM_BASH", "1")]).await;
++    b.initialize(1);
++    let sid = b.new_session(project.to_str().unwrap(), json!([]));
++    let id = prompt_request(&mut b, &sid, "make files");
++    let (_, req) = permission_request(&mut b);
++    assert_eq!(req["params"]["toolCall"]["toolCallId"], "d1");
++    answer_permission(&mut b, &req, selected("deny"));
++    let (notes, r) = b.until_response(id, Duration::from_secs(30));
++    assert_eq!(r["result"]["stopReason"], "end_turn", "{r}");
++    assert_eq!(r["result"]["text"], "The command was denied; how should I proceed?");
++    assert!(!project.join("one").exists() && !project.join("two").exists());
++    assert!(!asked(&notes), "the second call is not asked about");
++    let done = updates(&notes, "tool_call_update");
++    assert_eq!(done.len(), 1, "{done:#?}");
++    assert_eq!(done[0]["status"], "failed");
++    assert_eq!(done[0]["content"][0]["content"]["text"], "Not run: the user denied this command.");
++    assert_eq!(recorded.lock().unwrap().len(), 1, "no model request after the denial");
++
++    let (_, r) = b.prompt(&sid, "why not?");
++    assert_eq!(r["result"]["text"], "next", "{r}");
++    assert_eq!(
++        tool_results(recorded.lock().unwrap().last().unwrap()),
++        ["Not run: the user denied this command.", "Not run: the user cancelled the turn."]
++    );
++    b.shutdown();
++    let _ = std::fs::remove_dir_all(&project);
++}
++
++/// Stop while the prompt is open: the client answers `cancelled` (as ACP
++/// requires) and the turn is cancelled without running the command. A
++/// prompt dismissed without a Stop counts as Deny. A client that answers
++/// with an error is no approval either: the turn ends saying how to turn
++/// the prompt off.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn ask_cancel_dismiss_and_client_error() {
++    let project = fresh_dir("ask-cancel");
++    let touch = json!({"command": "touch made"});
++    let replies = vec![
++        tool_call("c1", "bash", touch.clone()),
++        tool_call("c2", "bash", touch.clone()),
++        tool_call("c3", "bash", touch),
++    ];
++    let (mut b, _) = Bridge::start(script(replies), &[("LLM_CONFIRM_BASH", "1")]).await;
++    b.initialize(1);
++    let sid = b.new_session(project.to_str().unwrap(), json!([]));
++
++    let id = prompt_request(&mut b, &sid, "one");
++    let (_, req) = permission_request(&mut b);
++    b.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": &sid}}));
++    answer_permission(&mut b, &req, json!({"outcome": "cancelled"}));
++    let (_, r) = b.until_response(id, Duration::from_secs(30));
++    assert_eq!(r["result"]["stopReason"], "cancelled", "{r}");
++
++    let id = prompt_request(&mut b, &sid, "two");
++    let (_, req) = permission_request(&mut b);
++    answer_permission(&mut b, &req, json!({"outcome": "cancelled"}));
++    let (_, r) = b.until_response(id, Duration::from_secs(30));
++    assert_eq!(r["result"]["text"], "The command was denied; how should I proceed?", "{r}");
++
++    let id = prompt_request(&mut b, &sid, "three");
++    let (_, req) = permission_request(&mut b);
++    b.send(&json!({"jsonrpc": "2.0", "id": req["id"], "error": {"code": -32601, "message": "Method not found"}}));
++    let (_, r) = b.until_response(id, Duration::from_secs(30));
++    let text = r["result"]["text"].as_str().unwrap();
++    assert!(text.contains("Method not found") && text.contains("LLM_CONFIRM_BASH=0"), "{text}");
++    assert!(!project.join("made").exists());
++    b.shutdown();
++    let _ = std::fs::remove_dir_all(&project);
++}
++
++/// ACP v2 has no `toolCall` in the request: a prompt `title` and a
++/// `command` subject (command, cwd, toolCallId) instead. Line breaks show
++/// as ⏎ in the title, so no line is hidden.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn ask_v2_request_shape() {
++    let project = fresh_dir("ask-v2");
++    let command = "echo a\ntouch made";
++    let replies = vec![tool_call("v1", "bash", json!({"command": command})), answer("ran")];
++    let (mut b, _) = Bridge::start(script(replies), &[("LLM_CONFIRM_BASH", "1")]).await;
++    b.initialize(2);
++    let sid = b.new_session(project.to_str().unwrap(), json!([]));
++    let id = prompt_request(&mut b, &sid, "run");
++    let (_, req) = permission_request(&mut b);
++    let p = &req["params"];
++    assert!(p.get("toolCall").is_none(), "{p}");
++    assert_eq!(p["title"], "Run: echo a ⏎ touch made");
++    assert_eq!(p["subject"]["type"], "command");
++    assert_eq!(p["subject"]["command"], command);
++    assert_eq!(p["subject"]["toolCallId"], "v1");
++    assert!(Path::new(p["subject"]["cwd"].as_str().unwrap()).ends_with(project.file_name().unwrap()), "{p}");
++    answer_permission(&mut b, &req, selected("allow"));
++    b.until_response(id, Duration::from_secs(30));
++    assert!(project.join("made").exists(), "allowed: it ran");
++    b.shutdown();
++    let _ = std::fs::remove_dir_all(&project);
 +}
