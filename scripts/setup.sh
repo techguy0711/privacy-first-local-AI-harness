@@ -554,17 +554,20 @@ EOF
 
     # VS Code agent: the same binary with editors/acp/config.vscode.toml, run
     # by the ACP Client extension. Nothing is written to VS Code's settings;
-    # these lines go into the user's settings.json. acp.agents replaces the
-    # extension's built-in agent list (npx packages that talk to their
-    # vendors' clouds).
+    # these lines go into the user's settings.json. VS Code merges acp.agents
+    # with the extension's 11 built-in agents (npx packages that talk to their
+    # vendors' clouds; expanding one in the tree starts it), so each is set to
+    # null, which the extension refuses to start (ACP Client 0.2.0's names).
     cat <<EOF
 
 VS Code agent (replaces Continue): same acp-bridge, run by the "ACP Client"
 extension (formulahendry.acp-client). After each change it builds the project
 when it has a build and sends the errors back to the model.
-  1. Install "ACP Client" (publisher formulahendry) from the Extensions view.
+  1. Install "ACP Client" by Jun Han from the Extensions view (search
+     formulahendry.acp-client).
   2. Command Palette > "Preferences: Open User Settings (JSON)", and add inside
-     the outer braces (put a comma after the setting before it):
+     the outer braces (put a comma after the setting before it). The extension
+     has no settings page, and its "+" (Add Agent) can't set env:
   "acp.agents": {
     "$ACP_AGENT_NAME agent": {
       "command": "$ACP_BIN",
@@ -576,17 +579,24 @@ when it has a build and sends the errors back to the model.
         "LLM_QUEUE": "1",
         "LLM_TIMEOUT": "$((EDITOR_TIMEOUT_MS / 1000))"$ACP_API_KEY_JSON
       }
-    }
+    },
+    "GitHub Copilot": null, "Claude Code": null, "Gemini CLI": null,
+    "Qwen Code": null, "Auggie CLI": null, "Qoder CLI": null,
+    "Codex CLI": null, "OpenCode": null, "OpenClaw": null,
+    "Kiro CLI": null, "Hermes Agent": null
   },
   "acp.logTraffic": false,
   "acp.autoApprovePermissions": "ask",
   "telemetry.telemetryLevel": "off"
-     The agent list replaces the extension's built-in agents (npx packages that
-     talk to their own clouds). logTraffic off keeps prompts and code out of
-     VS Code's output panel; "ask" shows each shell command for Allow / Always
-     allow / Deny; telemetry off also stops the extension's usage events (they
-     include the command of each such question).
-  3. Open "ACP Client" in the activity bar and connect to "$ACP_AGENT_NAME agent".
+     The null entries switch off the extension's 11 built-in agents (npx
+     packages that talk to their own clouds; expanding one would start it).
+     VS Code still lists them, but they can't start; "Remove Agent" can't
+     drop them. logTraffic off keeps prompts and code out of VS Code's output
+     panel; "ask" shows each shell command for Allow / Always allow / Deny;
+     telemetry off also stops the extension's usage events (they include the
+     command of each such question).
+  3. Click the "ACP Client" icon in the activity bar, then "$ACP_AGENT_NAME agent"
+     in its Agents view to connect; type in the Chat view below it.
 Saved agent conversations: $REPO_ROOT/data/acp-bridge-vscode/
 Details: docs/editors.md (VS Code).
 EOF
