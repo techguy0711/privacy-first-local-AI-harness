@@ -56,6 +56,19 @@ def inline_image(part):
     return {'type': 'image_url', 'image_url': {'url': url}}, len(raw)
 
 
+class ClosingStreamingResponse(StreamingResponse):
+    """Closes its generator however the response ends, so the generator's
+    finally always ends the job. A client that hangs up while the response
+    waits in send() cancels the response outside the generator, which then
+    stayed suspended at its yield until a garbage collection freed it: the
+    job ran on in Ollama to max_tokens, once for 6 minutes (2026-11-01)."""
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self.body_iterator.aclose()
+
+
 def audit_logger(path):
     """One JSON line per request and per finished job -- who, when, what,
     outcome -- never message content. '' turns it off. Rotated at midnight UTC;
@@ -519,7 +532,7 @@ def create_app(cfg=None, transport=None):
                 finally:
                     # Standard streams cannot safely replay partially consumed tool calls.
                     q.forget(j)
-            return StreamingResponse(events(), media_type='text/event-stream', headers=headers)
+            return ClosingStreamingResponse(events(), media_type='text/event-stream', headers=headers)
         try:
             while j.state not in TERMINAL:
                 if await request.is_disconnected():

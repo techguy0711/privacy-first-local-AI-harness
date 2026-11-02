@@ -245,7 +245,7 @@ Supply a stable `Idempotency-Key` when submitting a job. Within its retention pe
 ### Limitations
 
 - Jobs and results are stored in memory. Reconnects require the same gateway process and an unexpired job; server restarts lose them.
-- A failed cancellation request can leave inference running until its deadline. Confirm GPU resource release on the selected backend.
+- Cancelling stops the work in Ollama, not just in the gateway. Checked with Ollama 0.35.0 (2026-11-01): a client hanging up on a standard stream, `DELETE` on a running job, and `INFERENCE_TIMEOUT_SECONDS` each ended generation within a second. A cancellation that never arrives, such as a `DELETE` lost with the client's connection, leaves the job running until it finishes or reaches that deadline. Before 2026-11-01, a client that hung up on a stream could leave its request generating in Ollama up to `max_tokens` (one test ran 6 minutes on after a 12-second read); `tests/test_gateway.py` now covers that case.
 - Multiple gateway replicas and durable job recovery are not supported.
 - Automated tests do not establish server performance or IDE rendering compatibility. Complete the rollout checks on the target hardware and editor versions.
 

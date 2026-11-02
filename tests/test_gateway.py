@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from dataclasses import replace
 from datetime import date
+from unittest import mock
 
 import httpx
+from fastapi.responses import StreamingResponse
 from services.config import ROOT, Settings
 from services.gateway import Queue, audit_logger, create_app, loopback_sockets
 
@@ -266,6 +268,50 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('[DONE]', j.chunks)
         finally:
             await q.client.aclose()
+
+    async def test_client_hangup_mid_stream_cancels_job(self):
+        # The client stops reading, then hangs up while the response waits in
+        # send() with its generator paused at a yield. The job must end then,
+        # not run on in Ollama.
+        async def endless(request):
+            async def chunks():
+                for _ in range(50):
+                    yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
+                await asyncio.Event().wait()
+            return httpx.Response(200, content=chunks())
+        q = self.app.state.queue
+        await q.client.aclose()
+        q.client = httpx.AsyncClient(transport=httpx.MockTransport(endless))
+        request = [{'type': 'http.request', 'body': json.dumps({**BODY, 'stream': True}).encode()}]
+        hung_up = asyncio.Event()
+        async def receive():
+            if request:
+                return request.pop()
+            await hung_up.wait()
+            return {'type': 'http.disconnect'}
+        async def send(message):
+            await asyncio.Event().wait()
+        scope = {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.3'}, 'http_version': '1.1',
+                 'method': 'POST', 'scheme': 'http', 'path': '/v1/chat/completions', 'raw_path': b'/v1/chat/completions',
+                 'query_string': b'', 'root_path': '', 'client': ('127.0.0.1', 1), 'server': ('127.0.0.1', 8787),
+                 'headers': [(b'authorization', b'Bearer alice'), (b'content-type', b'application/json')]}
+        # In the live gateway a reference cycle held the paused generator until
+        # a garbage collection, minutes later or never; hold it the same way.
+        held, init = [], StreamingResponse.__init__
+        def hold(response, content, *args, **kwargs):
+            held.append(content)
+            init(response, content, *args, **kwargs)
+        with mock.patch.object(StreamingResponse, '__init__', hold):
+            response = asyncio.create_task(self.app(scope, receive, send))
+            try:
+                await self.wait_for(lambda: held and held[0].ag_frame.f_lasti and not held[0].ag_running)
+                self.assertEqual(len(q.running), 1)
+                hung_up.set()
+                await self.wait_for(lambda: not q.running and not q.jobs)
+            finally:
+                response.cancel()
+                await asyncio.gather(response, return_exceptions=True)
+                await q.client.aclose()
 
     async def test_trusted_webui_identity(self):
         r = await self.client.post('/v1/jobs', json=BODY, headers={'Authorization': 'Bearer test-service', 'X-OpenWebUI-User-Id': 'bob'})
