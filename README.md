@@ -1,5 +1,7 @@
 # Self-hosted AI coding stack
 
+[![Tests](https://github.com/techguy0711/privacy-first-local-AI-harness/actions/workflows/test.yml/badge.svg)](https://github.com/techguy0711/privacy-first-local-AI-harness/actions/workflows/test.yml)
+
 A coding assistant that runs open-weight models on your own hardware: one Mac (`MODE=local`) or a shared server for a team (`MODE=server`). Developers use it in the browser through Open WebUI, and in Xcode, Android Studio and VS Code through an agent that edits, builds and fixes code.
 
 - **What it is**: setup scripts and configuration around Ollama (Gemma 4 12B on a Mac, Llama 3.3 70B on a server), an inference gateway with bounded per-user queues, Open WebUI, optional Brave Search (MCP), and an ACP agent (`acp-bridge`) for the IDEs. Only [allowlisted models](AGENTS.md#hard-rules) run; models of Chinese origin and anything derived from them are excluded.
@@ -180,7 +182,7 @@ After `./scripts/setup.sh` has created `.venv/openwebui`:
 .venv/openwebui/bin/python -m unittest discover -s tests -v
 ```
 
-They simulate inference, so they need no models, downloads or network.
+They simulate inference, so they need no models, downloads or network. GitHub runs them on every push and pull request, with syntax checks of the scripts ([.github/workflows/test.yml](.github/workflows/test.yml)).
 
 ## License
 

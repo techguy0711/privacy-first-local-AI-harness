@@ -170,7 +170,8 @@ Rules 6 to 8 are about how work is done here, not code.
 | `scripts/sbom.py` | CycloneDX SBOM of what is installed | `setup.sh` step 9 |
 | `editors/acp/*.toml` | acp-bridge config per IDE (prompt, guards, MCP policy, Brave URL, persistence, `[permissions]`) | acp-bridge at runtime; `doctor.sh` loads each |
 | `editors/acp/*.patch` | our changes to upstream acp-bridge, applied in order on the pinned tag | `setup.sh --editors` (`git apply`); no script regenerates them |
-| `tests/` | gateway, config and voice cleanup unit tests; simulated inference, no models | `.venv/openwebui/bin/python -m unittest discover -s tests` |
+| `tests/` | gateway, config and voice cleanup unit tests; simulated inference, no models | `.venv/openwebui/bin/python -m unittest discover -s tests`; CI |
+| `.github/workflows/test.yml` | CI on each push and pull request: the unit tests with the gateway's dependencies at Open WebUI's versions, `bash -n` of the scripts, Python syntax | GitHub Actions (standard runner, free for public repositories) |
 | `server-test/` | `MODE=server` in Docker on a Mac: Dockerfile, compose, `boot.sh`, Caddyfile, 8B Modelfile | `docker compose` (docs/server.md) |
 | `docs/` | `editors.md` IDE setup, the shared agent, its test record and open checks, `privacy.md` egress findings and verified env vars, `server.md` deployment and settings reference, `compliance.md`, `comparison.md`, this file | people and agents |
 
@@ -180,7 +181,7 @@ State on disk (gitignored): `.venv/openwebui`, `data/` (openwebui, whisper, acp-
 
 | Change | Edit | Also update |
 |---|---|---|
-| Upgrade Open WebUI | `OPEN_WEBUI_VERSION` in `runtime.sh` | re-verify `stack.sh` env flags and `set_webui_defaults` against the new version (rule 7); record it in docs/privacy.md |
+| Upgrade Open WebUI | `OPEN_WEBUI_VERSION` in `runtime.sh` | re-verify `stack.sh` env flags and `set_webui_defaults` against the new version (rule 7); record it in docs/privacy.md; the gateway's dependency versions in `.github/workflows/test.yml` |
 | Upgrade acp-bridge | `ACP_BRIDGE_VERSION` + `ACP_BRIDGE_COMMIT` in `runtime.sh` | both patches must still apply on the new tag |
 | Upgrade Brave MCP server | `services/brave-mcp/package.json` and its lockfile together | `check_brave`'s `/ping` comment names the version it was read in |
 | Change a chat model or context | `Modelfile.$MODE` | a new base model must be allowlisted: AGENTS.md rule 1, `setup.sh` `case`, `doctor.sh` `ALLOWLIST` (needs approval) |
