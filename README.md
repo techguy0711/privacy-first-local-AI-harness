@@ -46,7 +46,7 @@ If you already have a `.env`, keep it. Open `.env` and confirm `MODE=local`. Set
 
 This sets up the local models (Gemma 4 12B as `coder-local`, plus `nomic-embed-text`), Open WebUI, and the Whisper small model for Open WebUI's voice input (downloaded once to `data/whisper/` and checked against pinned hashes). On macOS it also builds the IDE agent (`acp-bridge`, which Xcode, Android Studio and VS Code run) from source, which needs Rust — see the [prerequisites](#one-time-prerequisites). Nothing is written to your editors' settings; setup prints what to enter. Each run also writes a software bill of materials of everything it installed to `build/sbom.cdx.json` (CycloneDX).
 
-Every run of `setup.sh` also limits how much RAM Ollama spends caching prompts (`LLAMA_ARG_*`, which you can override in `.env`; by default it could use about 8 GB, enough to push a 16 GB Mac into swap), stores the model's context memory in 8 bits (`OLLAMA_KV_CACHE_TYPE=q8_0`, about 0.5 to 1.1 GB less), and gives the model two conversation slots (`OLLAMA_NUM_PARALLEL=2`) so Open WebUI's background calls don't push your chat out of its cache. See [docs/server.md](docs/server.md#configuration-reference) for what each changes. None of them shortens the model's context. On macOS it adds a login item that keeps these settings after a restart. When setup says so, quit and reopen the Ollama app once.
+Setup also tunes Ollama's memory use for a 16 GB Mac: a smaller prompt cache, an 8-bit context cache and two conversation slots, none of which shortens the model's context ([details](docs/server.md#configuration-reference); override them in `.env`). A login item keeps them after a restart. When setup says so, quit and reopen the Ollama app once.
 
 **Read the terminal output before closing it:** the script prints the exact values to enter in Android Studio's model provider settings, the JSON for the optional Android Studio agent, the paths and environment values for registering the Xcode agent, and the settings for the VS Code agent. Finish the IDE steps below after setup.
 
@@ -62,14 +62,15 @@ Open the `Web UI:` address it prints at the end, **[http://127.0.0.1:3000/](http
 
 The command starts the inference gateway, Open WebUI and, when a Brave key is set, the Brave MCP server. Ollama must already be running.
 
-### 4. Finish the one-time Web UI settings
+### 4. Use the Web UI
 
-- The inference gateway adds [prompts/system.md](prompts/system.md) and today's date to chat requests automatically.
-- **Images and files**: attach them in the message box. Screenshots and other images (PNG, JPEG or WebP, not GIF) go to the model, which reads them; documents (PDF, text, code) are read by Open WebUI on this machine and passed on as text. The gateway takes images only when they're sent inline and never fetches a link.
-- **Voice**: the microphone button (dictation) and the call button (voice mode) work with nothing to configure. Open WebUI turns your speech into text on this machine, and replies are read aloud with your browser's built-in voices, one paragraph at a time. In **Settings → Audio**, keep both engines on **Default** and leave **Allow non-local voices** off: the other choices send your audio or the replies to Google, Apple or Hugging Face (see [docs/privacy.md](docs/privacy.md#voice-input-and-spoken-replies)). Each recording is deleted as soon as it's transcribed (the "Delete voice recordings" function in **Admin Settings → Functions**, which `stack.sh up` installs and keeps on).
-- **Suggestions are off**: `stack.sh up` turns off Open WebUI's suggested prompts on a new chat and its suggested follow-ups after each reply. Chat titles and tags are still generated, without the model's thinking, so they finish much sooner, and in their own conversation slot, so your next reply doesn't re-read the whole chat (see [docs/server.md](docs/server.md#configuration-reference)).
-- With `BRAVE_API_KEY` set, `stack.sh up` adds **Brave Search** to Open WebUI and turns it on by default in new `coder-local` chats; there is nothing to configure. The model decides when to search, for example for current events or the latest version of a tool. Each message then takes longer, because the model first decides whether to search. To turn search off for one chat, click the wrench icon in the message box and switch off **Brave Search**. `stack.sh up` turns it back on as the default for new chats, even if you turned it off in **Admin Settings → Models**. Open WebUI connects to the local Brave MCP server, which holds the key, so the key never enters Open WebUI. Don't add tool connections in Admin Settings: Open WebUI forgets them at restart, because `stack.sh` makes `.env` authoritative.
-- **Open WebUI's own tools are off**: `stack.sh up` switches off the 23 built-in tools Open WebUI adds to each chat (searching your notes, chats and Knowledge, calendar, automations, memory and more). They made every message longer and sent the model searching instead of answering. Attached files and Knowledge are still read.
+There is nothing more to configure:
+
+- **Images and files**: attach them in the message box. The model reads screenshots and other images (PNG, JPEG or WebP, not GIF); Open WebUI reads documents (PDF, text, code) on this machine and passes them on as text.
+- **Voice**: the microphone button dictates and the call button starts voice mode. Your speech becomes text on this machine, each recording is deleted once transcribed, and your browser's built-in voices read the replies aloud. In **Settings → Audio**, keep both engines on **Default** and leave **Allow non-local voices** off: the other choices send your audio or the replies to Google, Apple or Hugging Face ([details](docs/privacy.md#voice-input-and-spoken-replies)).
+- **Web search** (with `BRAVE_API_KEY` set): **Brave Search** is on in new chats, and the model decides when to search, for example for the latest version of a tool, so each message takes a little longer. To turn it off for one chat, click the wrench icon in the message box. The key stays with the local Brave server, never in Open WebUI.
+
+`stack.sh up` sets the rest at each start, so changes made in **Admin Settings** to these don't last: the gateway adds [prompts/system.md](prompts/system.md) and today's date to every chat; Brave Search, when set up, is the default tool and Open WebUI's 23 built-in tools (notes, calendar, memory and more) are off, since they slowed every message (attached files and Knowledge are still read); suggested prompts and follow-ups are off; and chat titles and tags are made without the model's thinking, in their own conversation slot, so they don't slow your next reply ([details](docs/server.md#configuration-reference)). Don't add tool connections in Admin Settings either: Open WebUI forgets them at restart.
 
 ### 5. Connect your IDE
 
@@ -179,11 +180,7 @@ After `./scripts/setup.sh` has created `.venv/openwebui`:
 .venv/openwebui/bin/python -m unittest discover -s tests -v
 ```
 
-These tests use in-process fake inference responses, with no downloads or network calls.
-For live queue testing use the existing local Ollama model with `QUEUE_ACTIVE=1`.
-The IDE agents use `LLM_QUEUE=1` to show waiting/running status and reconnect to
-jobs. Open WebUI and the IDEs' plain-chat providers receive standard streaming
-responses and keepalives; they don't display queue positions. See [editor limitations](docs/editors.md).
+They simulate inference, so they need no models, downloads or network.
 
 ## License
 

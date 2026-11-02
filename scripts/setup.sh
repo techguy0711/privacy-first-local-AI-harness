@@ -554,7 +554,7 @@ errors back to the model.
 }
   2. Pick "$ACP_AGENT_NAME agent" in the agent window. Don't install agents from
      the registry list there: they are downloaded and talk to their own clouds.
-Privacy notes and what is still unverified: docs/editors.md (Android Studio agent).
+Privacy notes: docs/editors.md (ACP agent in Android Studio); what is still unverified: its "Not yet checked".
 EOF
 
     # VS Code agent: the same binary with editors/acp/config.vscode.toml, run

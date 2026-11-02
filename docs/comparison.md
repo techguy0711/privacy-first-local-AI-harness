@@ -24,7 +24,7 @@ Several products cover one piece of this stack: a self-hosted coding server, a l
 | **The IDEs themselves** | | |
 | Xcode 27, Android Studio | Both connect to a locally hosted model natively; this stack's plain-chat setups use exactly that ([editors.md](editors.md)). | A direct connection skips the gateway: nothing adds [prompts/system.md](../prompts/system.md), removes Android Studio's Gemini-backed web search tool, or queues requests per user. |
 
-The IDE agent here is built on [acp-bridge](https://github.com/BlakeHung/acp-bridge), which already describes itself as an air-gapped ACP adapter for local models. This repo pins it, audits it, and patches it (`editors/acp/acp-bridge.patch`, `queue.patch`) with the guarded Brave search, Xcode's tools, the build-and-fix loop and the gateway's job queue ([editors.md](editors.md#agent-acp-via-acp-bridge--tools-xcodes-own-tools-guarded-web-search)).
+The IDE agent here is built on [acp-bridge](https://github.com/BlakeHung/acp-bridge), which already describes itself as an air-gapped ACP adapter for local models. This repo pins it, audits it, and patches it (`editors/acp/acp-bridge.patch`, `queue.patch`) with the guarded Brave search, Xcode's tools, the build-and-fix loop and the gateway's job queue ([editors.md](editors.md#the-acp-agent)).
 
 ## What's specific to this stack
 

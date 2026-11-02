@@ -1,6 +1,6 @@
 # Architecture
 
-How the pieces of this repo connect: what runs, who starts it, how configuration reaches it, and where each hard rule (AGENTS.md / CLAUDE.md) is enforced. Read this before scanning the code. It is a map, not a replacement for the code: when it and the code disagree, the code wins, and this file gets fixed in the same change.
+How the pieces of this repo connect: what runs, who starts it, how configuration reaches it, and where each hard rule (AGENTS.md, which CLAUDE.md imports for Claude Code) is enforced. Read this before scanning the code. It is a map, not a replacement for the code: when it and the code disagree, the code wins, and this file gets fixed in the same change.
 
 ## What runs (local mode)
 
@@ -172,7 +172,7 @@ Rules 6 to 8 are about how work is done here, not code.
 | `editors/acp/*.patch` | our changes to upstream acp-bridge, applied in order on the pinned tag | `setup.sh --editors` (`git apply`); no script regenerates them |
 | `tests/` | gateway, config and voice cleanup unit tests; simulated inference, no models | `.venv/openwebui/bin/python -m unittest discover -s tests` |
 | `server-test/` | `MODE=server` in Docker on a Mac: Dockerfile, compose, `boot.sh`, Caddyfile, 8B Modelfile | `docker compose` (docs/server.md) |
-| `docs/` | `editors.md` IDE setup, `privacy.md` egress findings and verified env vars, `server.md` deployment and settings reference, `compliance.md`, `comparison.md`, this file | people and agents |
+| `docs/` | `editors.md` IDE setup, the shared agent, its test record and open checks, `privacy.md` egress findings and verified env vars, `server.md` deployment and settings reference, `compliance.md`, `comparison.md`, this file | people and agents |
 
 State on disk (gitignored): `.venv/openwebui`, `data/` (openwebui, whisper, acp-bridge*), `logs/`, `run/` (pids, `.env` hash, Modelfile hash), `build/` (brave-mcp, acp-bridge source and cargo output, SBOM), `bin/` (acp-bridge + stamp). Outside the repo: `~/.ollama/server.json`, the LaunchAgent plist and `launchctl` env, `~/.cargo/registry`, `~/Library/Caches/acp-bridge/DerivedData`.
 
@@ -183,7 +183,7 @@ State on disk (gitignored): `.venv/openwebui`, `data/` (openwebui, whisper, acp-
 | Upgrade Open WebUI | `OPEN_WEBUI_VERSION` in `runtime.sh` | re-verify `stack.sh` env flags and `set_webui_defaults` against the new version (rule 7); record it in docs/privacy.md |
 | Upgrade acp-bridge | `ACP_BRIDGE_VERSION` + `ACP_BRIDGE_COMMIT` in `runtime.sh` | both patches must still apply on the new tag |
 | Upgrade Brave MCP server | `services/brave-mcp/package.json` and its lockfile together | `check_brave`'s `/ping` comment names the version it was read in |
-| Change a chat model or context | `Modelfile.$MODE` | a new base model must be allowlisted: CLAUDE.md/AGENTS.md rule 1, `setup.sh` `case`, `doctor.sh` `ALLOWLIST` (needs approval) |
+| Change a chat model or context | `Modelfile.$MODE` | a new base model must be allowlisted: AGENTS.md rule 1, `setup.sh` `case`, `doctor.sh` `ALLOWLIST` (needs approval) |
 | Add a tunable setting | `Settings.read` in `config.py` (default there), `shell()` if scripts need it | commented line in `.env.example`, row in docs/server.md's configuration reference, `ConfigTests` |
 | Add an Open WebUI env flag | `stack.sh` `start_openwebui` | privacy flags: `check_privacy_env` list and docs/privacy.md's table |
 | Gateway behavior | `services/gateway.py` | `tests/test_gateway.py` |

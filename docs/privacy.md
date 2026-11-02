@@ -55,7 +55,7 @@ These points come from reading code or binaries and from tests, not from watchin
 - inside Android Studio: the removal of its web search tool (checked through the gateway only), whether its Android docs tools reach Google while the Local Provider is selected, and whether the Local Provider works with the Google account signed out;
 - a voice recording made in the browser.
 
-The [release capture](#release-capture) is meant to close these.
+The [release capture](#release-capture) is meant to close these. Checks still open in the IDEs that aren't about privacy (images, Android Studio's command dialog) are listed in [editors.md](editors.md#not-yet-checked).
 
 ### How to turn each off
 
@@ -259,7 +259,7 @@ tcpdump -nn -r ~/egress.pcapng port 53
 
 **Pass**: the stack's own processes (Ollama, the venv's Python running Open WebUI and the gateway, `node` running the Brave server, `acp-bridge`) reach only `api.search.brave.com`, from `node`, during searches. Any other host from them fails the release. Traffic from the IDEs and the browser to their vendors is expected; compare it with [the IDEs, macOS and the browser](#the-ides-macos-and-the-browser) and add any new host there.
 
-Record the date, the commit and the versions in `build/sbom.cdx.json`, with a table like the ones below, and update [not yet verified live](#not-yet-verified-live) and the "Checked" notes the run covers, here and in `docs/editors.md` (images in Xcode and Android Studio, a conversation and the command dialog inside Android Studio). The capture holds everything the Mac sent in that time: keep it out of the repo and delete it once recorded.
+Record the date, the commit and the versions in `build/sbom.cdx.json`, with a table like the ones below, and update [not yet verified live](#not-yet-verified-live) and the "Checked" notes the run covers, here and in `docs/editors.md` (its test record and [Not yet checked](editors.md#not-yet-checked) list). The capture holds everything the Mac sent in that time: keep it out of the repo and delete it once recorded.
 
 ### Open WebUI 0.12.3 (verified live, 2026-10-23)
 
