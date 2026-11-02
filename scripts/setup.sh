@@ -23,6 +23,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
   err ".env not found. Run: cp .env.example .env"
   exit 1
 fi
+# It holds the keys, and cp leaves it readable by other accounts.
+chmod 600 "$ENV_FILE"
 
 # setup.sh also puts Ollama's memory settings in the login environment
 # (launchctl), so a shell started since then inherits the values last applied;
@@ -82,6 +84,28 @@ EOF
       exit 1
     fi
   fi
+fi
+
+# uv (step 5) and, with a Brave key, Node (step 5c) are checked up front too,
+# so a missing one stops setup before the model downloads.
+if ! command -v uv >/dev/null 2>&1; then
+  err "'uv' is not installed (needed to install Open WebUI natively). This script will not auto-install it."
+  cat >&2 <<'EOF'
+Install it yourself first:
+  macOS: brew install uv
+  Linux: curl -LsSf https://astral.sh/uv/install.sh | sh
+Then re-run this script.
+EOF
+  exit 1
+fi
+if ! uv pip install --help 2>/dev/null | grep -q -- '--excludes'; then
+  err "This uv has no --excludes option (needed to leave out rapidocr). Update it: brew upgrade uv (or: uv self update)"
+  exit 1
+fi
+if [[ -n "${BRAVE_API_KEY:-}" ]] && { ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; }; then
+  err "Node.js (node and npm) is not installed -- needed for the Brave Search MCP server, since BRAVE_API_KEY is set. This script will not auto-install it."
+  echo "Install it yourself (brew install node), or leave BRAVE_API_KEY empty to skip web search, then re-run." >&2
+  exit 1
 fi
 
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
@@ -256,16 +280,6 @@ if ! ollama show "$EMBED_MODEL" >/dev/null 2>&1; then
 fi
 
 # ---------- 5. Install Open WebUI natively via uv (repo-local venv) ----------
-if ! command -v uv >/dev/null 2>&1; then
-  err "'uv' is not installed (needed to install Open WebUI natively). This script will not auto-install it."
-  cat >&2 <<'EOF'
-Install it yourself first:
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-Then re-run this script.
-EOF
-  exit 1
-fi
-
 VENV_DIR="$REPO_ROOT/.venv/openwebui"
 # venvs hardcode their absolute path, so one copied or moved from another
 # folder/machine exists but can't run -- rebuild it (DATA_DIR lives outside it).
@@ -289,10 +303,6 @@ fi
 # rapidocr, an open-webui dependency, bundles Baidu's PaddleOCR models and
 # fetches more from modelscope.cn. It only serves OCR of images in PDFs
 # (PDF_EXTRACT_IMAGES, off), so it is never installed: hard rule 1.
-if ! uv pip install --help 2>/dev/null | grep -q -- '--excludes'; then
-  err "This uv has no --excludes option (needed to leave out rapidocr). Update it: brew upgrade uv (or: uv self update)"
-  exit 1
-fi
 UV_EXCLUDES="$(mktemp)"
 printf 'rapidocr\nrapidocr-onnxruntime\n' > "$UV_EXCLUDES"
 log "Installing open-webui==$OPEN_WEBUI_VERSION without rapidocr (no-op if already installed)..."
@@ -337,11 +347,6 @@ fi
 BRAVE_DIR="$REPO_ROOT/build/brave-mcp"
 BRAVE_LOCK="$REPO_ROOT/services/brave-mcp/package-lock.json"
 if [[ -n "${BRAVE_API_KEY:-}" ]]; then
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    err "Node.js (node and npm) is not installed -- needed for the Brave Search MCP server, since BRAVE_API_KEY is set. This script will not auto-install it."
-    echo "Install it yourself (brew install node), or leave BRAVE_API_KEY empty to skip web search, then re-run." >&2
-    exit 1
-  fi
   # The lockfile is the pin: an upgrade changes it, nothing else.
   BRAVE_PINNED="$(node -p "require(process.argv[1]).packages['node_modules/@brave/brave-search-mcp-server'].version" "$BRAVE_LOCK")"
   BRAVE_STAMP="lock_sha256=$(shasum -a 256 "$BRAVE_LOCK" | awk '{print $1}')"

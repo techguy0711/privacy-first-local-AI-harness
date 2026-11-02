@@ -4,7 +4,7 @@ A coding assistant that runs open-weight models on your own hardware: one Mac (`
 
 - **What it is**: setup scripts and configuration around Ollama (Gemma 4 12B on a Mac, Llama 3.3 70B on a server), an inference gateway with bounded per-user queues, Open WebUI, optional Brave Search (MCP), and an ACP agent (`acp-bridge`) for the IDEs. Only [allowlisted models](AGENTS.md#hard-rules) run; models of Chinese origin and anything derived from them are excluded.
 - **What leaves the machine**: at runtime, only Brave Search API calls, and only with a Brave key set. Setup downloads the models and software once. The IDEs and the browser still contact their own vendors. Details and evidence: [docs/privacy.md](docs/privacy.md).
-- **What it isn't**: a product, a hosted service or an authorized system. Local models make mistakes, so review generated code as you would any contribution. The IDE agents run the shell commands the model writes, without a sandbox or a confirmation step.
+- **What it isn't**: a product, a hosted service or an authorized system. Local models make mistakes, so review generated code as you would any contribution. The IDE agents run the shell commands the model writes without a sandbox, once you allow each one in the IDE ([approving commands](docs/editors.md#approving-commands)), so read what you approve.
 - **What the deploying organization owns**: the authorization (an ATO or a CMMC assessment), sign-in with MFA, TLS and network egress rules, log retention, and the policy decisions: whether to allow Brave Search, which code the agents may work on, and how OMB M-26-04 applies to each model. [docs/compliance.md](docs/compliance.md) maps the stack to U.S. federal requirements and lists the rest.
 
 See [server setup and Mac testing](docs/server.md) for Ollama deployment and queue limitations, and [how this compares](docs/comparison.md) for similar projects and what this stack does differently.
@@ -28,10 +28,10 @@ Run these commands from this project folder. Complete the [one-time prerequisite
 
 ### 1. Configure local mode
 
-For a new setup, copy the example configuration:
+For a new setup, copy the example configuration, readable only by you since it will hold your keys:
 
 ```bash
-cp .env.example .env
+cp .env.example .env && chmod 600 .env
 ```
 
 If you already have a `.env`, keep it. Open `.env` and confirm `MODE=local`. Set `BRAVE_API_KEY` to enable web search, or leave it empty to skip search.
@@ -141,6 +141,27 @@ Run `./scripts/setup.sh` to apply setup again. To refresh IDE configuration, run
 ```
 
 The editor option rebuilds the IDE agent (`acp-bridge`) only when its pinned version, commit, or patch changed, or `bin/acp-bridge` was replaced (Xcode then asks to allow it again). Setup pulls a model only when it isn't installed and never re-checks Ollama's registry, so models change only when you pull one yourself; after `ollama pull gemma4:12b`, rebuild `coder-local` on it with `ollama create coder-local -f Modelfile.local`. Version pins (Open WebUI, acp-bridge, Whisper) are in `scripts/runtime.sh`, not `.env`, so a `git pull` brings new ones. When `OPEN_WEBUI_VERSION` changes, setup rebuilds Open WebUI's venv and keeps `data/`, and the next start migrates its database; back up `data/openwebui` first, as in [upgrading Open WebUI](docs/server.md#upgrade-open-webui). Review the terminal output for any remaining manual steps, especially Xcode registration. If you move this project folder, update the agent paths in Xcode, Android Studio and VS Code.
+
+## Uninstall
+
+The stack keeps everything in this folder except what these steps remove:
+
+1. Stop it: `./scripts/stack.sh down`.
+2. Remove the IDE entries you added: the agent in Xcode (**Settings → Intelligence → Agents**); in Android Studio, the agent (**Settings → Tools → AI → Agents**, saved in `~/.android/studio/agent/acp.json`) and the provider under **Model Providers**; in VS Code, our agent under `acp.agents` in your user `settings.json`, or the ACP Client extension itself (while it's installed, keep the `null` entries: they stop its built-in cloud agents).
+3. Remove Ollama's memory settings, the login item and the four values it sets, then quit and reopen the Ollama app:
+   ```bash
+   rm ~/Library/LaunchAgents/local-ai-harness.ollama-env.plist
+   ```
+   ```bash
+   for v in OLLAMA_KV_CACHE_TYPE OLLAMA_NUM_PARALLEL LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM; do launchctl unsetenv "$v"; done
+   ```
+4. Remove the models, unless something else uses them (on a server: `coder-server llama3.3:70b nomic-embed-text`):
+   ```bash
+   ollama rm coder-local gemma4:12b nomic-embed-text
+   ```
+5. Delete this folder. That deletes the Open WebUI accounts, chats and uploads (`data/openwebui/`), the agents' saved conversations, the logs, the keys in `.env`, Open WebUI's venv and the built agent.
+
+Left in place: `"disable_ollama_cloud": true` in `~/.ollama/server.json`, which keeps Ollama Cloud off (delete that line to undo it; setup saved any earlier version beside it as `server.json.<time>.bak`); the prerequisites you installed; the Python 3.11 that uv downloaded if your Mac had none (`uv python uninstall 3.11`); and the download caches of uv, npm and Cargo (`uv cache clean`, `npm cache clean --force`, `~/.cargo/registry`). On a Linux server, also remove the memory settings you added with `sudo systemctl edit ollama.service` (keep `OLLAMA_NO_CLOUD=1` to leave Ollama Cloud off).
 
 ## Shared server setup
 
