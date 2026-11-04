@@ -103,7 +103,15 @@ Two things differ from a real server:
 
 ### Start it
 
-You need Ollama running on the Mac with `llama3.1:8b` and `nomic-embed-text` pulled, and a container runtime. Tested with Colima 0.10.3 (open source, no telemetry): `brew install colima docker docker-compose`, then `colima start --cpu 4 --memory 4`. Homebrew's Compose works as `docker-compose`; for `docker compose`, add the `cliPluginsExtraDirs` line that `brew info docker-compose` shows to `~/.docker/config.json`. Docker Desktop and OrbStack work too.
+You need Ollama running on the Mac with `llama3.1:8b` and `nomic-embed-text` pulled, and a container runtime. Tested with Colima 0.10.3 (open source, no telemetry): `brew install colima docker docker-compose`, then `colima start --cpu 4 --memory 4`. Docker Desktop and OrbStack work too.
+
+With Homebrew's Compose, the commands below stop with `docker: unknown command: docker compose` until Docker knows where the plugin is. Add the `cliPluginsExtraDirs` entry that `brew info docker-compose` shows to `~/.docker/config.json`, inside its outer braces and with a comma after the entry before it. On an Apple silicon Mac it is:
+
+```json
+"cliPluginsExtraDirs": ["/opt/homebrew/lib/docker/cli-plugins"]
+```
+
+Or type `docker-compose` wherever this section says `docker compose`.
 
 From the repo root:
 

@@ -11,7 +11,7 @@ for _ in $(seq 1 10); do
   sleep 1
 done
 if ! curl -fsS --max-time 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
-  echo "ERROR: Ollama is not reachable on the Mac (127.0.0.1:11434 there). Open the Ollama app, then: docker compose restart server" >&2
+  echo "ERROR: Ollama is not reachable on the Mac (127.0.0.1:11434 there). Open the Ollama app, then: docker compose -f server-test/compose.yaml restart server" >&2
   exit 1
 fi
 
@@ -24,7 +24,7 @@ cd ~/stack
 # First start: `cp .env.example .env` and the settings of docs/server.md step 1.
 if [[ ! -f .env ]]; then
   sed -e 's/^MODE=.*/MODE=server/' -e 's/^SERVER_HOST=.*/SERVER_HOST=localhost:8443/' .env.example > .env
-  echo "Created .env for MODE=server (edit it with: docker compose exec server nano .env)"
+  echo "Created .env for MODE=server (edit it with: docker compose -f server-test/compose.yaml exec server nano .env)"
 fi
 # Nothing from the previous start is running; its pid files could now name
 # unrelated processes.
