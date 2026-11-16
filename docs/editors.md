@@ -187,8 +187,14 @@ Follow up in the same conversation to continue a stopped turn. Each follow-up re
 
 ### Queue and server connection
 
-`setup.sh --editors` applies `queue.patch` after `acp-bridge.patch` and includes
-both hashes in the build stamp. Register `LLM_QUEUE=1` and the `LLM_TIMEOUT`
+`setup.sh --editors` applies `queue.patch` after `acp-bridge.patch`, then
+`speed.patch` (`read_file` advertises `offset`/`limit`, a doubled
+project prefix such as `MyApp/MyApp/X.swift` is corrected when the folder is
+named like the project, `edit` results show the changed lines so the model
+doesn't re-read the file, and a whole-file `read_file` of a file over 250
+lines returns only the lines around the latest `search_code`/`code-search`
+hits in it, once; asking again returns the whole file; `bash` finds
+`scripts/code-search` on its PATH and counts it as read-only), and includes all three hashes in the build stamp. Register `LLM_QUEUE=1` and the `LLM_TIMEOUT`
 printed by setup. Endpoints are `http://127.0.0.1:8787/v1` locally or
 `https://<SERVER_HOST>/v1` on a server. Keep the server API key in `.env` and
 supply it through your existing editor environment mechanism; never put it in
