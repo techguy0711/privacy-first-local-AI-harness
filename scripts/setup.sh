@@ -59,11 +59,11 @@ if $INSTALL_EDITORS && [[ "$(uname -s)" == "Darwin" ]]; then
   ACP_STAMP="$REPO_ROOT/bin/acp-bridge.stamp"
   ACP_PATCH="$REPO_ROOT/editors/acp/acp-bridge.patch"
   ACP_BUILD="$REPO_ROOT/build/acp-bridge"
-  if [[ ! -f "$ACP_PATCH" || ! -f "$REPO_ROOT/editors/acp/queue.patch" ]]; then
-    err "An editor patch (acp-bridge.patch or queue.patch) is missing -- it is part of this repo and acp-bridge is built with it. Restore it (e.g. git checkout -- editors/acp/acp-bridge.patch) and re-run."
+  if [[ ! -f "$ACP_PATCH" || ! -f "$REPO_ROOT/editors/acp/queue.patch" || ! -f "$REPO_ROOT/editors/acp/speed.patch" ]]; then
+    err "An editor patch (acp-bridge.patch, queue.patch or speed.patch) is missing -- it is part of this repo and acp-bridge is built with it. Restore it (e.g. git checkout -- editors/acp/acp-bridge.patch) and re-run."
     exit 1
   fi
-  ACP_STAMP_INPUTS="version=$ACP_BRIDGE_VERSION commit=$ACP_BRIDGE_COMMIT patch_sha256=$(cat "$ACP_PATCH" "$REPO_ROOT/editors/acp/queue.patch" | shasum -a 256 | awk '{print $1}')"
+  ACP_STAMP_INPUTS="version=$ACP_BRIDGE_VERSION commit=$ACP_BRIDGE_COMMIT patch_sha256=$(cat "$ACP_PATCH" "$REPO_ROOT/editors/acp/queue.patch" "$REPO_ROOT/editors/acp/speed.patch" | shasum -a 256 | awk '{print $1}')"
   if [[ -x "$ACP_BIN" && -f "$ACP_STAMP" ]] \
     && [[ "$(cat "$ACP_STAMP")" == "$ACP_STAMP_INPUTS bin_sha256=$(shasum -a 256 "$ACP_BIN" | awk '{print $1}')" ]] \
     && "$ACP_BIN" --version >/dev/null 2>&1; then
@@ -466,6 +466,7 @@ EOF
       fi
       git -C "$ACP_BUILD/src" apply --whitespace=nowarn "$ACP_PATCH"
       git -C "$ACP_BUILD/src" apply --whitespace=nowarn "$REPO_ROOT/editors/acp/queue.patch"
+      git -C "$ACP_BUILD/src" apply --whitespace=nowarn "$REPO_ROOT/editors/acp/speed.patch"
       log "Building acp-bridge with $("$CARGO" --version) (cargo build --release --locked; needs Rust 1.86+; the first build takes a few minutes)..."
       "$CARGO" build --release --locked \
         --manifest-path "$ACP_BUILD/src/Cargo.toml" --target-dir "$ACP_BUILD/target"

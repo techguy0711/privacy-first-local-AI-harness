@@ -1,0 +1,410 @@
+diff --git a/src/config.rs b/src/config.rs
+index 152ebf2..70c8bbd 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -496,7 +496,9 @@ mod tests {
+         // System prompt + every tool schema the model can get stays at
+         // about 2,000 tokens (chars/3.5 over the JSON, a conservative
+         // estimate; measured 2,087 with the shortened built-in schemas and
+-        // the proposed prompt; it was ~2,500 before).
++        // the proposed prompt; it was ~2,500 before). read_file's
++        // offset/limit add ~18 (2,106): worth it, one whole-file read of a
++        // large Swift file was ~7,300 tokens.
+         let mut defs = crate::tools::tool_definitions();
+         crate::tools::add_build_note(&mut defs);
+         defs.push(crate::notes::tool_definition());
+@@ -504,7 +506,7 @@ mod tests {
+         defs.push(crate::websearch::definition());
+         let chars = serde_json::Value::Array(defs).to_string().len() + prompt.len();
+         let tokens = crate::context::tokens_for_chars(chars);
+-        assert!(tokens < 2_100, "system prompt + tools = {tokens} tokens");
++        assert!(tokens < 2_125, "system prompt + tools = {tokens} tokens");
+     }
+ 
+     #[test]
+diff --git a/src/guards.rs b/src/guards.rs
+index d28fbe8..5b7549a 100644
+--- a/src/guards.rs
++++ b/src/guards.rs
+@@ -717,6 +717,9 @@ pub fn is_read_only_bash(command: &str) -> bool {
+         };
+         let long_has = |prefix: &str| args.iter().any(|a| a.starts_with(prefix));
+         match *first {
++            // speed.patch: searching only reads (--index writes the
++            // harness's own data/code-index, never the project).
++            "code-search" => !long_has("--index"),
+             "git" => match words.get(1) {
+                 Some(&("status" | "log" | "diff" | "show")) => !long_has("--output"),
+                 // Listing only: no names, no -d / -D / -m / -c / -u.
+@@ -1092,7 +1095,7 @@ mod tests {
+         for c in [
+             "ls -la", "cat a.swift | head -5", "grep -rn scene MyApp", "git status", "git log --oneline", "xcodebuild -list",
+             "sort -rn a.txt", "sort -t: -k2 a.txt", "uniq -c a.txt", "cat a | sort | uniq", "tree -L 2", "git branch",
+-            "git branch -a", "git branch --show-current", "rg -n scene",
++            "git branch -a", "git branch --show-current", "rg -n scene", "code-search \"where photos are saved\"",
+         ] {
+             assert!(is_read_only_bash(c), "{c}");
+         }
+@@ -1103,7 +1106,7 @@ mod tests {
+             "sort -o MyApp/Out.swift a.txt", "sort -rno out.txt a.txt", "sort --output=out.txt a", "uniq A.swift B.swift",
+             "tree -o listing.txt", "git branch -D feature", "git branch -m main old", "git branch feature",
+             "git diff --output=patch.txt", "find . -fprint list.txt", "find . -fls x", "rg --pre ./x scene",
+-            "sort --compress-program=sh a",
++            "sort --compress-program=sh a", "code-search --index ."
+         ] {
+             assert!(!is_read_only_bash(c), "{c}");
+         }
+diff --git a/src/tools.rs b/src/tools.rs
+index e959fb6..e7cb556 100644
+--- a/src/tools.rs
++++ b/src/tools.rs
+@@ -3,6 +3,7 @@
+ 
+ use crate::process::{self, CancelToken};
+ use serde_json::{json, Value};
++use std::collections::HashMap;
+ use std::path::{Path, PathBuf};
+ use std::process::Command;
+ use std::time::Duration;
+@@ -15,6 +16,80 @@ const MAX_LIST_DEPTH: usize = 3;
+ /// Maximum entries in directory listing.
+ const MAX_LIST_ENTRIES: usize = 200;
+ 
++/// speed.patch: a whole-file read of a file longer than this
++/// returns only the lines around the latest search's hits in it.
++const LARGE_READ_LINES: usize = 250;
++/// Lines shown before and after each search hit in such a read.
++const HIT_CONTEXT_LINES: usize = 30;
++/// Hit lines (1-based, inclusive ranges) per file from the latest
++/// `search_code` or `code-search`, keyed by canonical path.
++static SEARCH_HITS: std::sync::Mutex<Option<HashMap<PathBuf, Vec<(usize, usize)>>>> =
++    std::sync::Mutex::new(None);
++
++/// Remember where the latest search found matches. Lines look like
++/// `path:12:text` (search_code) or `path:10-49  0.71  decl` (code-search).
++fn record_search_hits(working_dir: &Path, output: &str) {
++    let mut hits: HashMap<PathBuf, Vec<(usize, usize)>> = HashMap::new();
++    for line in output.lines() {
++        let Some((path, rest)) = line.split_once(':') else { continue };
++        let digits = |s: &str| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>();
++        let Ok(start) = digits(rest).parse::<usize>() else { continue };
++        let after = &rest[digits(rest).len()..];
++        let end = after
++            .strip_prefix('-')
++            .and_then(|s| digits(s).parse::<usize>().ok())
++            .unwrap_or(start)
++            .max(start);
++        if let Some(p) = resolve_sandboxed_path(working_dir, path).filter(|p| p.is_file()) {
++            hits.entry(p).or_default().push((start, end));
++        }
++    }
++    // Replace only this project's hits (another session may use another).
++    let wd = working_dir.canonicalize().unwrap_or_else(|_| working_dir.to_path_buf());
++    if let Ok(mut map) = SEARCH_HITS.lock() {
++        let map = map.get_or_insert_with(HashMap::new);
++        map.retain(|p, _| !p.starts_with(&wd));
++        map.extend(hits);
++    }
++}
++
++/// For a long file the latest search hit, the lines around those hits
++/// (and the hits are used up, so asking again returns the whole file).
++fn windowed_read(working_dir: &Path, path: &str, text: &str) -> Option<String> {
++    let lines: Vec<&str> = text.lines().collect();
++    if lines.len() <= LARGE_READ_LINES {
++        return None;
++    }
++    let key = resolve_sandboxed_path(working_dir, path)?;
++    let mut hits = SEARCH_HITS.lock().ok()?.as_mut()?.remove(&key)?;
++    hits.sort();
++    let mut windows: Vec<(usize, usize)> = Vec::new();
++    for (s, e) in hits.into_iter().take(6) {
++        let (s, e) = (s.saturating_sub(HIT_CONTEXT_LINES).max(1), (e + HIT_CONTEXT_LINES).min(lines.len()));
++        match windows.last_mut() {
++            Some(last) if s <= last.1 + 1 => last.1 = last.1.max(e),
++            _ => windows.push((s, e)),
++        }
++    }
++    let (first, last) = (windows.first()?.0, windows.last()?.1);
++    let mut out = format!(
++        "[{path} has {} lines; showing lines {first}-{last} around your search hit. \
++         Read other parts with offset/limit.]\n",
++        lines.len()
++    );
++    let mut shown_to = 0;
++    for (s, e) in windows {
++        if shown_to > 0 {
++            out.push_str(&format!("[lines {}-{} not shown]\n", shown_to + 1, s - 1));
++        }
++        for (i, l) in lines[s - 1..e].iter().enumerate() {
++            out.push_str(&format!("{:>5}  {l}\n", s + i));
++        }
++        shown_to = e;
++    }
++    Some(out)
++}
++
+ fn is_ignored_entry(name: &str) -> bool {
+     name.starts_with('.') || matches!(name, "node_modules" | "target" | "__pycache__")
+ }
+@@ -55,10 +130,14 @@ pub fn all_tool_definitions() -> Vec<Value> {
+             "type": "function",
+             "function": {
+                 "name": "read_file",
+-                "description": "Read a text file and return its content.",
++                "description": "Read a text file; offset/limit read a line range.",
+                 "parameters": {
+                     "type": "object",
+-                    "properties": {"path": path("File path")},
++                    "properties": {
++                        "path": path("File path"),
++                        "offset": {"type": "integer"},
++                        "limit": {"type": "integer"}
++                    },
+                     "required": ["path"]
+                 }
+             }
+@@ -293,7 +372,8 @@ pub fn resolve_alias(name: &str, args: &Value) -> (String, Value) {
+ /// lists files as `<Project>/MyApp/X.swift` while the cwd is the project
+ /// folder: when `<first component>` does not exist in the cwd and equals the
+ /// cwd's name or the stem of a `*.xcodeproj` / `*.xcworkspace` in it, it is
+-/// dropped. A real sub-folder with that name is left alone.
++/// dropped. A real sub-folder with that name is left alone, except when the
++/// path doesn't exist under it but does without it (a doubled prefix).
+ pub fn normalize_path(working_dir: &Path, path: &str) -> String {
+     let mut p = path.trim().to_string();
+     if Path::new(&p).is_absolute() {
+@@ -321,7 +401,11 @@ pub fn normalize_path(working_dir: &Path, path: &str) -> String {
+         Some((f, r)) => (f.to_string(), r.to_string()),
+         None => return p,
+     };
+-    if first.is_empty() || first == "." || first == ".." || working_dir.join(&first).exists() {
++    if first.is_empty() || first == "." || first == ".." {
++        return p;
++    }
++    let first_is_real = working_dir.join(&first).exists();
++    if first_is_real && working_dir.join(&p).exists() {
+         return p;
+     }
+     let project_names: Vec<String> = std::iter::once(
+@@ -346,12 +430,22 @@ pub fn normalize_path(working_dir: &Path, path: &str) -> String {
+     )
+     .filter(|n| !n.is_empty())
+     .collect();
+-    if project_names.contains(&first) {
+-        if rest.is_empty() {
+-            ".".to_string()
+-        } else {
+-            rest
+-        }
++    if !project_names.contains(&first) {
++        return p;
++    }
++    if !first_is_real {
++        return if rest.is_empty() { ".".to_string() } else { rest };
++    }
++    // The usual Xcode layout has a real folder named like the project
++    // (MyApp/ next to MyApp.xcodeproj), so a model that adds the navigator
++    // prefix to a correct path writes MyApp/MyApp/X.swift. Drop the first
++    // component only when the path doesn't exist and the shorter one does
++    // (or, for a new file, only the shorter one's folder exists).
++    let full = working_dir.join(&p);
++    let short = working_dir.join(&rest);
++    let folder_exists = |q: &Path| q.parent().is_some_and(Path::is_dir);
++    if !rest.is_empty() && (short.exists() || (!folder_exists(&full) && folder_exists(&short))) {
++        rest
+     } else {
+         p
+     }
+@@ -782,6 +876,9 @@ pub fn execute_tool_with_cancel(
+             .and_then(|v| v.as_str())
+             .unwrap_or("");
+         let (output, success) = run_bash(working_dir, command, cancel);
++        if success && command.contains("code-search") {
++            record_search_hits(working_dir, &output);
++        }
+         return ToolOutcome {
+             output,
+             failed: !success,
+@@ -824,9 +921,12 @@ pub fn execute_tool(working_dir: &Path, name: &str, arguments: &Value) -> String
+             let text = execute_read_file(working_dir, path);
+             let offset = arguments.get("offset").and_then(|v| v.as_u64());
+             let limit = arguments.get("limit").and_then(|v| v.as_u64());
+-            if text.starts_with("Error") || (offset.is_none() && limit.is_none()) {
++            if text.starts_with("Error") {
+                 return text;
+             }
++            if offset.is_none() && limit.is_none() {
++                return windowed_read(working_dir, path, &text).unwrap_or(text);
++            }
+             // XcodeRead-style window: 1-based start line, line count.
+             let start = offset.unwrap_or(1).max(1) as usize - 1;
+             let lines: Vec<&str> = text.lines().collect();
+@@ -853,7 +953,9 @@ pub fn execute_tool(working_dir: &Path, name: &str, arguments: &Value) -> String
+                 .and_then(|v| v.as_str())
+                 .unwrap_or("");
+             let file_glob = arguments.get("file_glob").and_then(|v| v.as_str());
+-            execute_search_code(working_dir, pattern, file_glob)
++            let out = execute_search_code(working_dir, pattern, file_glob);
++            record_search_hits(working_dir, &out);
++            out
+         }
+         "bash" => {
+             let command = arguments
+@@ -1297,6 +1399,19 @@ fn search_dir(
+     }
+ }
+ 
++/// speed.patch: the harness's `scripts/` folder when this
++/// binary runs from its `bin/` (it holds `code-search`), so `bash` finds
++/// `code-search` wherever the repo was cloned.
++fn harness_scripts_dir() -> Option<PathBuf> {
++    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
++    DIR.get_or_init(|| {
++        let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
++        let scripts = exe.parent()?.parent()?.join("scripts");
++        scripts.join("code-search").is_file().then_some(scripts)
++    })
++    .clone()
++}
++
+ /// Execute a bash command in the working directory with a timeout.
+ fn execute_bash(working_dir: &Path, command: &str) -> String {
+     run_bash(working_dir, command, None).0
+@@ -1327,6 +1442,10 @@ fn run_bash(working_dir: &Path, command: &str, cancel: Option<&CancelToken>) ->
+     let timeout = bash_timeout();
+     let mut cmd = Command::new("bash");
+     cmd.arg("-c").arg(command).current_dir(working_dir);
++    if let Some(dir) = harness_scripts_dir() {
++        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
++        cmd.env("PATH", format!("{}:{path}", dir.display()));
++    }
+     match process::run_command(cmd, timeout, cancel) {
+         Ok(output) => {
+             let mut result = String::new();
+@@ -1529,13 +1648,34 @@ fn execute_edit(working_dir: &Path, relative_path: &str, old_text: &str, new_tex
+         "edit"
+     );
+     format!(
+-        "patched {} ({} bytes -> {} bytes)",
++        "patched {} ({} bytes -> {} bytes)\n{}",
+         relative_path,
+         original.len(),
+-        patched.len()
++        patched.len(),
++        changed_lines(&original, &patched, old_text, new_text)
+     )
+ }
+ 
++/// The edited region of `patched` with line numbers and two lines of context,
++/// so the model can see the change took without reading the file again.
++fn changed_lines(original: &str, patched: &str, old_text: &str, new_text: &str) -> String {
++    const CONTEXT: usize = 2;
++    const MAX_LINES: usize = 40;
++    let Some(at) = original.find(old_text) else {
++        return String::new();
++    };
++    let first = patched[..at].matches('\n').count(); // 0-based line of the change
++    let last = first + new_text.trim_end_matches('\n').matches('\n').count();
++    let lines: Vec<&str> = patched.lines().collect();
++    let start = first.saturating_sub(CONTEXT);
++    let end = (last + CONTEXT + 1).min(lines.len()).min(start + MAX_LINES);
++    let mut out = format!("Lines {}-{} now read (no need to read the file again to check):\n", start + 1, end);
++    for (i, line) in lines[start..end].iter().enumerate() {
++        out.push_str(&format!("{:>5}  {}\n", start + i + 1, line));
++    }
++    out
++}
++
+ // ----------------------------------------------------------------------------
+ // Web fetch
+ // ----------------------------------------------------------------------------
+@@ -2235,9 +2375,15 @@ mod tests {
+         // A real sub-folder named like the project is NOT stripped.
+         fs::create_dir_all(root.join("Untitled Project")).unwrap();
+         assert_eq!(normalize_path(&root, "Untitled Project/X.swift"), "Untitled Project/X.swift");
+-        // Args of path tools only.
++        // Args of path tools only. With a real "Untitled Project/" folder that
++        // has no MyApp/ in it, the doubled prefix is still dropped.
+         let a = normalize_args(&root, "read_file", &json!({"path": "Untitled Project/MyApp/A.swift"}));
+-        assert_eq!(a["path"], "Untitled Project/MyApp/A.swift", "real folder now exists");
++        assert_eq!(a["path"], "MyApp/A.swift", "doubled project prefix");
++        // ...but a path that exists under the real folder is kept.
++        fs::create_dir_all(root.join("Untitled Project/Sub")).unwrap();
++        fs::write(root.join("Untitled Project/Sub/S.swift"), "x").unwrap();
++        assert_eq!(normalize_path(&root, "Untitled Project/Sub/S.swift"), "Untitled Project/Sub/S.swift");
++        assert_eq!(normalize_path(&root, "Untitled Project/Sub/New.swift"), "Untitled Project/Sub/New.swift");
+         fs::remove_dir_all(root.join("Untitled Project")).unwrap();
+         let a = normalize_args(&root, "write_file", &json!({"path": "Untitled Project/MyApp/B.swift", "content": "x"}));
+         assert_eq!(a, json!({"path": "MyApp/B.swift", "content": "x"}));
+@@ -2289,6 +2435,37 @@ mod tests {
+         fs::write(wd.join("h.txt"), "x y").unwrap();
+         let out = execute_tool(&wd, "edit", &json!({"path": "h.txt", "old_text": "x", "new_text": "z", "replace_all": true}));
+         assert!(out.starts_with("patched"), "{out}");
++        // The edit result shows the changed lines with context.
++        let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
++        fs::write(wd.join("k.txt"), &body).unwrap();
++        let out = execute_tool(&wd, "edit", &json!({"path": "k.txt", "old_text": "line 15\n", "new_text": "LINE 15\nline 15b\n"}));
++        assert!(out.starts_with("patched k.txt"), "{out}");
++        assert!(out.contains("Lines 13-18 now read"), "{out}");
++        assert!(out.contains("   15  LINE 15\n   16  line 15b\n"), "{out}");
++        assert!(!out.contains("line 12\n") && !out.contains("line 19"), "{out}");
++        let _ = fs::remove_dir_all(&wd);
++    }
++
++    #[test]
++    fn large_read_after_search_shows_only_the_hit() {
++        let wd = tmpwd();
++        let body: String = (1..=400).map(|i| format!("row {i}\n")).collect();
++        fs::write(wd.join("big.txt"), body.replace("row 200\n", "needle here\n")).unwrap();
++        fs::write(wd.join("small.txt"), "needle\n").unwrap();
++        // No search yet: the whole file.
++        assert_eq!(execute_tool(&wd, "read_file", &json!({"path": "big.txt"})).lines().count(), 400);
++        execute_tool(&wd, "search_code", &json!({"pattern": "needle"}));
++        let out = execute_tool(&wd, "read_file", &json!({"path": "big.txt"}));
++        assert!(out.starts_with("[big.txt has 400 lines; showing lines 170-230"), "{out}");
++        assert!(out.contains("  200  needle here\n") && !out.contains("row 169\n") && !out.contains("row 231"), "{out}");
++        // The hits are used up: asking again gives the whole file.
++        assert_eq!(execute_tool(&wd, "read_file", &json!({"path": "big.txt"})).lines().count(), 400);
++        // Small files are always whole.
++        assert_eq!(execute_tool(&wd, "read_file", &json!({"path": "small.txt"})), "needle\n");
++        // code-search output (path:start-end) and two hits far apart.
++        record_search_hits(&wd, "big.txt:10-20  0.80  row 10\nbig.txt:350-351  0.70  row 350\n");
++        let out = execute_tool(&wd, "read_file", &json!({"path": "big.txt"}));
++        assert!(out.contains("showing lines 1-381") && out.contains("[lines 51-319 not shown]"), "{out}");
+         let _ = fs::remove_dir_all(&wd);
+     }
+ 
+diff --git a/tests/tooling_test.rs b/tests/tooling_test.rs
+index 7e3e6a5..07ea991 100644
+--- a/tests/tooling_test.rs
++++ b/tests/tooling_test.rs
+@@ -1385,9 +1385,13 @@ async fn step8b_swift_edits_get_xcode_diagnostics() {
+     let (notes, r) = b.prompt(&sid, "fix the scale mode");
+     assert_eq!(r["result"]["stopReason"], "end_turn", "{r}");
+     let results = tool_results(recorded.lock().unwrap().last().unwrap());
+-    assert_eq!(
+-        results[0],
+-        "patched MyApp/GameView.swift (2354 bytes -> 2370 bytes)\n\n[Xcode diagnostics for GameView.swift: 1 error]\nL45: Value of type 'SKView' has no member 'scaleMode'"
++    // speed.patch: the edit result also shows the changed lines.
++    assert!(results[0].starts_with("patched MyApp/GameView.swift (2354 bytes -> 2370 bytes)\nLines 43-47 now read"), "{}", results[0]);
++    assert!(results[0].contains("   45          skView.scaleMode = SKView.ScaleMode.fill\n"), "{}", results[0]);
++    assert!(
++        results[0].ends_with("\n[Xcode diagnostics for GameView.swift: 1 error]\nL45: Value of type 'SKView' has no member 'scaleMode'"),
++        "{}",
++        results[0]
+     );
+     assert!(results[1].ends_with("[Xcode diagnostics: no errors]"), "{}", results[1]);
+     assert!(!results[2].contains("Xcode diagnostics"), "{}", results[2]);
+@@ -1432,7 +1436,10 @@ async fn step8b_swift_edits_get_xcode_diagnostics() {
+     assert_eq!(r["result"]["stopReason"], "end_turn", "{r}");
+     assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+     let results = tool_results(recorded.lock().unwrap().last().unwrap());
+-    assert_eq!(results[0].split("\n<file-state>").next().unwrap(), "patched MyApp/GameView.swift (2354 bytes -> 2370 bytes)");
++    // speed.patch: the changed lines follow; no diagnostics (timed out).
++    let r0 = results[0].split("\n<file-state>").next().unwrap();
++    assert!(r0.starts_with("patched MyApp/GameView.swift (2354 bytes -> 2370 bytes)\nLines 43-47 now read"), "{r0}");
++    assert!(!r0.contains("Xcode diagnostics"), "{r0}");
+     b.shutdown();
+ }
+ 

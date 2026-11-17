@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Search a project's code by meaning, using nomic-embed-text on local Ollama.
+
+  code-search "where do captured photos get uploaded"   # search the current folder
+  code-search --index [FOLDER]                           # build or refresh its index
+
+The IDE agents run it through their bash tool, in the project folder. The index
+holds only vectors and line ranges (no code text), under data/code-index/,
+owner-only. Only Ollama on 127.0.0.1 is contacted. Standard library only, so
+macOS's /usr/bin/python3 can run it.
+"""
+import argparse
+import array
+import hashlib
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'services'))
+from config import EMBED_MODEL, loopback_url  # noqa: E402
+
+INDEX_DIR = ROOT / 'data' / 'code-index'
+EXTENSIONS = {'.swift', '.m', '.mm', '.h', '.c', '.cc', '.cpp', '.metal',
+              '.kt', '.java', '.js', '.ts', '.tsx', '.py'}
+SKIP_DIRS = {'.git', 'build', 'DerivedData', 'Pods', 'Carthage', '.build', '.swiftpm',
+             'node_modules', 'xcuserdata', 'vendor'}
+MAX_FILE_BYTES = 400_000
+CHUNK_LINES, OVERLAP = 40, 10
+MAX_CHUNK_CHARS = 1500     # stays inside the embed model's default context
+BATCH = 32
+# Embedding more than this many chunks during a search could pass the agent's
+# 120 s bash timeout, so the search uses the old index and asks for --index.
+SEARCH_UPDATE_LIMIT = 300
+DECL = re.compile(r'^\s*(?:@\w+\s+)*(?:(?:public|private|internal|fileprivate|open|final|static|override|'
+                  r'nonisolated|mutating|@MainActor)\s+)*(?:func|class|struct|enum|extension|protocol|'
+                  r'actor|init|var|let|case|def|fun|interface|function)\b')
+
+
+def ollama_url():
+    url = 'http://127.0.0.1:11434'
+    env = ROOT / '.env'
+    if env.exists():
+        for line in env.read_text().splitlines():
+            if line.startswith('OLLAMA_BASE_URL='):
+                url = line.split('=', 1)[1].split('#', 1)[0].strip() or url
+    return loopback_url(url)
+
+
+def embed(texts):
+    body = json.dumps({'model': EMBED_MODEL, 'input': texts, 'truncate': True}).encode()
+    req = urllib.request.Request(ollama_url() + '/api/embed', body, {'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        vectors = json.load(r)['embeddings']
+    out = []
+    for v in vectors:
+        n = math.sqrt(sum(x * x for x in v)) or 1.0
+        out.append([x / n for x in v])
+    return out
+
+
+def project_files(root):
+    try:
+        listed = subprocess.run(['git', '-C', str(root), 'ls-files', '-co', '--exclude-standard'],
+                                capture_output=True, text=True, timeout=30, check=True).stdout.splitlines()
+        candidates = [Path(p) for p in listed]
+    except (OSError, subprocess.SubprocessError):
+        candidates = []
+        for d, dirs, files in os.walk(root):
+            dirs[:] = [x for x in dirs if x not in SKIP_DIRS and not x.endswith(('.xcassets', '.xcodeproj'))]
+            candidates += [Path(d, f).relative_to(root) for f in files]
+    keep = []
+    for rel in candidates:
+        if rel.suffix not in EXTENSIONS or SKIP_DIRS.intersection(rel.parts):
+            continue
+        p = root / rel
+        try:
+            if p.is_file() and p.stat().st_size <= MAX_FILE_BYTES:
+                keep.append(rel.as_posix())
+        except OSError:
+            pass
+    return sorted(keep)
+
+
+def chunks_of(text):
+    lines = text.splitlines()
+    out, start = [], 0
+    while start < len(lines):
+        end = min(start + CHUNK_LINES, len(lines))
+        if '\n'.join(lines[start:end]).strip():
+            out.append((start + 1, end))
+        if end == len(lines):
+            break
+        start = end - OVERLAP
+    return out
+
+
+def index_paths(root):
+    key = hashlib.sha256(str(root).encode()).hexdigest()[:16]
+    d = INDEX_DIR / key
+    return d, d / 'meta.json', d / 'vectors.f32'
+
+
+def load_index(root):
+    d, meta_p, vec_p = index_paths(root)
+    if not meta_p.exists():
+        return {'root': str(root), 'dim': 0, 'files': {}}, array.array('f')
+    meta = json.loads(meta_p.read_text())
+    vecs = array.array('f')
+    with open(vec_p, 'rb') as f:
+        vecs.frombytes(f.read())
+    return meta, vecs
+
+
+def save_index(root, meta, vecs):
+    d, meta_p, vec_p = index_paths(root)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(INDEX_DIR, 0o700)
+    for path, data, mode in ((vec_p, vecs.tobytes(), 'wb'), (meta_p, json.dumps(meta), 'w')):
+        tmp = path.with_suffix('.tmp')
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, mode) as f:
+            f.write(data)
+        os.replace(tmp, path)
+
+
+def update(root, limit=None, quiet=False):
+    """Re-embed changed files. Returns (meta, vecs, chunks_still_pending)."""
+    meta, vecs = load_index(root)
+    dim, old = meta['dim'], meta['files']
+    files, todo = {}, []
+    for rel in project_files(root):
+        st = (root / rel).stat()
+        sig = [int(st.st_mtime), st.st_size]
+        prev = old.get(rel)
+        if prev and prev['sig'] == sig:
+            files[rel] = prev
+        else:
+            todo.append((rel, sig))
+    pending = []
+    for rel, sig in todo:
+        text = (root / rel).read_text(errors='replace')
+        lines = text.splitlines()
+        for a, b in chunks_of(text):
+            body = '\n'.join(lines[a - 1:b])[:MAX_CHUNK_CHARS]
+            pending.append((rel, sig, a, b, f'search_document: {rel}\n{body}'))
+    if limit is not None and len(pending) > limit:
+        return meta, vecs, len(pending)
+    new_vecs = {}
+    t0 = time.time()
+    for i in range(0, len(pending), BATCH):
+        batch = pending[i:i + BATCH]
+        for item, v in zip(batch, embed([p[4] for p in batch])):
+            new_vecs.setdefault(item[0], []).append((item[2], item[3], v))
+        if not quiet and len(pending) > BATCH:
+            print(f'\rEmbedded {min(i + BATCH, len(pending))}/{len(pending)} chunks', end='', file=sys.stderr)
+    if not quiet and len(pending) > BATCH:
+        print(f' in {time.time() - t0:.0f} s', file=sys.stderr)
+    # Rebuild the vector file in file order: unchanged files copy their rows.
+    out, out_files = array.array('f'), {}
+    for rel in sorted(set(files) | set(new_vecs)):
+        if rel in new_vecs:
+            rows = new_vecs[rel]
+            dim = len(rows[0][2])
+            sig = next(s for r, s in todo if r == rel)
+            ranges = []
+            for a, b, v in rows:
+                ranges.append([a, b])
+                out.extend(v)
+        else:
+            sig, ranges = files[rel]['sig'], files[rel]['ranges']
+            first = files[rel]['row']
+            out.extend(vecs[first * dim:(first + len(ranges)) * dim])
+        out_files[rel] = {'sig': sig, 'ranges': ranges, 'row': len(out) // dim - len(ranges)}
+    meta = {'root': str(root), 'dim': dim, 'files': out_files, 'model': EMBED_MODEL}
+    save_index(root, meta, out)
+    return meta, out, 0
+
+
+def label(path, a, b):
+    try:
+        lines = path.read_text(errors='replace').splitlines()[a - 1:b]
+    except OSError:
+        return ''
+    for line in lines:
+        if DECL.match(line):
+            return line.strip()[:100]
+    return next((l.strip()[:100] for l in lines if l.strip()), '')
+
+
+def search(root, query, n):
+    meta, vecs, pending = update(root, limit=SEARCH_UPDATE_LIMIT, quiet=True)
+    if not meta['files']:
+        print('No index yet. Ask the user to run: code-search --index' if pending else 'No source files found.')
+        return
+    if pending:
+        print(f'(index is out of date: {pending} chunks changed; results may be stale. '
+              f'The user can refresh it with: code-search --index)')
+    q = embed([f'search_query: {query}'])[0]
+    dim, hits = meta['dim'], []
+    # Test files echo the app code's words; rank them lower unless asked for.
+    wants_tests = 'test' in query.lower()
+    for rel, f in meta['files'].items():
+        damp = 1.0 if wants_tests or not re.search(r'tests?/|tests?\.', rel, re.I) else 0.93
+        for k, (a, b) in enumerate(f['ranges']):
+            base = (f['row'] + k) * dim
+            score = damp * sum(x * y for x, y in zip(q, vecs[base:base + dim]))
+            hits.append((score, rel, a, b))
+    hits.sort(reverse=True)
+    shown, taken = 0, {}
+    for score, rel, a, b in hits:
+        if any(a <= y and x <= b for x, y in taken.get(rel, [])):
+            continue  # overlaps a better hit in the same file
+        taken.setdefault(rel, []).append((a, b))
+        print(f'{rel}:{a}-{b}  {score:.2f}  {label(root / rel, a, b)}')
+        shown += 1
+        if shown == n:
+            break
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Search code by meaning (local embeddings).')
+    ap.add_argument('query', nargs='*', help='what you are looking for, in plain words')
+    ap.add_argument('--index', nargs='?', const='.', metavar='FOLDER', help='build or refresh the index')
+    ap.add_argument('-n', type=int, default=8, help='results to show (default 8)')
+    args = ap.parse_args()
+    try:
+        if args.index is not None:
+            root = Path(args.index).resolve()
+            meta, _, _ = update(root)
+            chunks = sum(len(f['ranges']) for f in meta['files'].values())
+            print(f'Indexed {len(meta["files"])} files ({chunks} chunks) in {root}')
+        elif args.query:
+            search(Path.cwd().resolve(), ' '.join(args.query), args.n)
+        else:
+            ap.print_help()
+    except OSError as e:
+        sys.exit(f'code-search: {e} (is Ollama running, with {EMBED_MODEL} pulled?)')
+
+
+if __name__ == '__main__':
+    main()

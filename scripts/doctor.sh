@@ -504,7 +504,7 @@ check_acp_bridge() {
     return
   fi
   local inputs bin_sha got installed_version
-  inputs="version=$ACP_BRIDGE_VERSION commit=$ACP_BRIDGE_COMMIT patch_sha256=$(cat "$patch" "$REPO_ROOT/editors/acp/queue.patch" | shasum -a 256 | awk '{print $1}')"
+  inputs="version=$ACP_BRIDGE_VERSION commit=$ACP_BRIDGE_COMMIT patch_sha256=$(cat "$patch" "$REPO_ROOT/editors/acp/queue.patch" "$REPO_ROOT/editors/acp/speed.patch" | shasum -a 256 | awk '{print $1}')"
   bin_sha="$(shasum -a 256 "$acp_bin" | awk '{print $1}')"
   got="$(cat "$REPO_ROOT/bin/acp-bridge.stamp" 2>/dev/null || true)"
   installed_version="$("$acp_bin" --version 2>/dev/null | awk '{print $2}')"
